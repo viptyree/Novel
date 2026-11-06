@@ -2,6 +2,8 @@
 // 所有流水线逻辑已从 Python 移植到 Rust，不再依赖 Python 进程。
 
 mod llm;
+mod context;
+mod project_source;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -255,6 +257,7 @@ fn build_run_config(app: &tauri::AppHandle) -> Result<RunConfig, String> {
 // ============================================================
 
 const EDITABLE_FILES: &[&str] = &[
+    "author-notes.md",
     "memory/story_bible.yaml",
     "memory/characters.yaml",
     "memory/foreshadowing.yaml",
@@ -357,14 +360,6 @@ fn write_text(path: &Path, text: &str) {
     let _ = fs::write(path, text);
 }
 
-fn simple_token_estimate(text: &str) -> usize {
-    if text.is_empty() {
-        return 0;
-    }
-    // 与 Python 的 len(text) // 2 对齐
-    std::cmp::max(1, text.chars().count() / 2)
-}
-
 // ============================================================
 // LLM 消息构建辅助
 // ============================================================
@@ -436,331 +431,339 @@ fn run_completion(
 // 4.1 generate_chapter（移植 generate_chapter_local.py）
 // ============================================================
 
-const SYSTEM_PROMPT: &str = "你是中文长篇小说写手。
+type MemorySections = context::Memory;
 
-必须遵守：
-- 只输出小说正文
-- 不要解释
-- 不要输出大纲
-- 不要输出分析
-- 不要写\u{201c}以下是\u{201d}
-- 作者给的 chapter idea 是最高优先级
-- 本章必须围绕 chapter idea 展开
-- 不要扩写到下一章
-- 本章内部必须连贯
-- 不要重复同一事件
-- 不要重复发放同一奖励
-- 不要让同一个任务反复触发
-- 年龄、天气、地点、金额、物品、任务状态等关键事实一旦确定，后文不能随便改变
-- 不要与长期记忆冲突
-- 如果长期记忆和 chapter idea 冲突，以 chapter idea 为准；潜在冲突由外部报告提示，不要写入正文
-- 输出中文小说正文";
-
-/// 把结构化数据转成适合 prompt 的文本（等价于 Python 的 dump_block）
-fn dump_block_yaml(value: &serde_yaml::Value) -> String {
-    match value {
-        serde_yaml::Value::Null
-        | serde_yaml::Value::Mapping(_)
-        | serde_yaml::Value::Sequence(_) => {
-            let text = serde_yaml::to_string(value).unwrap_or_default();
-            let trimmed = text.trim();
-            if trimmed.is_empty()
-                || trimmed == "null"
-                || trimmed == "---\n{}"
-                || trimmed == "{}"
-                || trimmed == "[]"
-            {
-                "（未提供）".to_string()
-            } else {
-                trimmed.to_string()
-            }
-        }
-        _ => {
-            let text = serde_yaml::to_string(value).unwrap_or_default();
-            let trimmed = text.trim().to_string();
-            if trimmed.is_empty() || trimmed == "null" {
-                "（未提供）".to_string()
-            } else {
-                trimmed
-            }
-        }
-    }
-}
-
-fn format_jsonl_records(records: &[serde_json::Value], empty_text: &str) -> String {
-    if records.is_empty() {
-        return empty_text.to_string();
-    }
-    records
-        .iter()
-        .map(|item| serde_json::to_string(item).unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn format_style_references(records: &[serde_json::Value]) -> String {
-    if records.is_empty() {
-        return "（未提供）".to_string();
-    }
-    let parts: Vec<String> = records
-        .iter()
-        .filter_map(|item| {
-            let sid = item
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("style");
-            let text = item
-                .get("text")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if text.is_empty() {
-                None
-            } else {
-                Some(format!("[{}]\n{}", sid, text))
-            }
-        })
-        .collect();
-    if parts.is_empty() {
-        "（未提供）".to_string()
-    } else {
-        parts.join("\n\n")
-    }
-}
-
-struct MemorySections {
-    sections: std::collections::HashMap<String, String>,
-    conflict_sources: Vec<(String, String)>,
-}
-
+#[cfg(test)]
 fn build_memory_sections(project_dir: &Path, use_context: bool) -> MemorySections {
-    let skipped = "（--no-context 已启用，未读取长期记忆）".to_string();
-    let mut sections = std::collections::HashMap::new();
+    context::build(project_dir, "ch999999", "", use_context, &context::Options::default()).unwrap()
+}
 
-    if !use_context {
-        for key in [
-            "Story Bible",
-            "Characters",
-            "Book Outline",
-            "Recent Chapter Summaries",
-            "Recent Events",
-            "Timeline",
-            "Active Foreshadowing",
-            "Style References",
-        ] {
-            sections.insert(key.to_string(), skipped.clone());
-        }
-        return MemorySections {
-            sections,
-            conflict_sources: Vec::new(),
-        };
+const DEFAULT_SYSTEM_PROMPT: &str = "你是一名中文长篇小说写作助手，只输出小说正文。";
+const DEFAULT_USER_TEMPLATE: &str = "【章初人物状态】
+{{人物状态}}
+
+【前情】
+{{前情}}
+
+【相关设定与伏笔】
+{{相关设定与伏笔}}
+
+【文风参考】
+{{文风参考}}
+
+【事件骨架】
+{{事件骨架}}
+
+【写作要求】
+写成完整连续的小说场景。
+人物与前情为章初资料，本章可依事件骨架取得新物品、获知信息、展示新能力或改变状态。
+未在本章骨架安排的未来规划不得提前展开。
+目标约 {{目标字数}} 中文字。
+{{叙事要求}}
+遵循作者事件骨架的顺序，不改变动作执行者。
+不重复前文已发生的事件，不提前进入下一章主要剧情。
+只输出本章小说正文，不附标题、分析或说明。";
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct PromptSettings {
+    system: String,
+    user_template: String,
+    #[serde(default = "default_consistency_prompt")]
+    consistency: TaskPrompt,
+    #[serde(default = "default_memory_prompt")]
+    memory: TaskPrompt,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct TaskPrompt {
+    system: String,
+    user_template: String,
+}
+
+fn legacy_task_template(template: &str) -> String {
+    let mut text = template.to_string();
+    for (old, new) in [
+        ("chapter_id", "章节ID"), ("chapter_text", "章节正文"), ("chapter_idea", "事件骨架"),
+        ("characters_text", "人物状态"), ("world_rules_text", "世界观规则"),
+        ("foreshadowing_text", "伏笔"), ("events_text", "近期事件"), ("timeline_text", "时间线"),
+    ] {
+        text = text.replace(&format!("{{{}}}", old), &format!("{{{{{}}}}}", new));
     }
+    text
+}
 
-    let story_bible = load_yaml(&project_dir.join("memory").join("story_bible.yaml"));
-    let characters = load_yaml(&project_dir.join("memory").join("characters.yaml"));
-    let foreshadowing = load_yaml(&project_dir.join("memory").join("foreshadowing.yaml"));
-    let book_outline = load_yaml(&project_dir.join("outlines").join("book_outline.yaml"));
-
-    let mut chapter_summaries =
-        read_jsonl(&project_dir.join("memory").join("chapter_summaries.jsonl"));
-    let cs_len = chapter_summaries.len();
-    if cs_len > 5 {
-        chapter_summaries = chapter_summaries.split_off(cs_len - 5);
-    }
-
-    let mut events = read_jsonl(&project_dir.join("memory").join("events.jsonl"));
-    let ev_len = events.len();
-    if ev_len > 20 {
-        events = events.split_off(ev_len - 20);
-    }
-
-    let mut timeline = read_jsonl(&project_dir.join("memory").join("timeline.jsonl"));
-    let tl_len = timeline.len();
-    if tl_len > 20 {
-        timeline = timeline.split_off(tl_len - 20);
-    }
-
-    let style_bank_raw = read_jsonl(&project_dir.join("memory").join("style_bank.jsonl"));
-    let style_bank: Vec<serde_json::Value> = style_bank_raw.into_iter().take(5).collect();
-
-    sections.insert("Story Bible".to_string(), dump_block_yaml(&story_bible));
-    sections.insert("Characters".to_string(), dump_block_yaml(&characters));
-    sections.insert("Book Outline".to_string(), dump_block_yaml(&book_outline));
-    sections.insert(
-        "Recent Chapter Summaries".to_string(),
-        format_jsonl_records(&chapter_summaries, "（暂无章节摘要）"),
-    );
-    sections.insert(
-        "Recent Events".to_string(),
-        format_jsonl_records(&events, "（暂无事件记录）"),
-    );
-    sections.insert(
-        "Timeline".to_string(),
-        format_jsonl_records(&timeline, "（暂无时间线记录）"),
-    );
-    sections.insert(
-        "Active Foreshadowing".to_string(),
-        dump_block_yaml(&foreshadowing),
-    );
-    sections.insert(
-        "Style References".to_string(),
-        format_style_references(&style_bank),
-    );
-
-    let conflict_keys = [
-        "Story Bible",
-        "Characters",
-        "Book Outline",
-        "Recent Chapter Summaries",
-        "Recent Events",
-        "Timeline",
-        "Active Foreshadowing",
-    ];
-    let conflict_sources: Vec<(String, String)> = conflict_keys
-        .iter()
-        .filter_map(|k| sections.get(*k).map(|v| (k.to_string(), v.clone())))
-        .collect();
-
-    MemorySections {
-        sections,
-        conflict_sources,
+fn default_consistency_prompt() -> TaskPrompt {
+    TaskPrompt {
+        system: "你是一位专业的小说编辑，专注于连续性审查。请用中文输出报告。".into(),
+        user_template: legacy_task_template(CONSISTENCY_CHECK_PROMPT),
     }
 }
 
-fn build_user_prompt(
-    chapter_id: &str,
-    idea: &str,
-    target_words: u32,
-    sections: &std::collections::HashMap<String, String>,
-    form_block: &str,
-) -> String {
-    let get = |k: &str| sections.get(k).map(|s| s.as_str()).unwrap_or("（未提供）");
-    format!(
-        r#"# Chapter Generation Context
+fn default_memory_prompt() -> TaskPrompt {
+    TaskPrompt {
+        system: "你只输出严格合法的JSON，不输出任何其他文本。".into(),
+        user_template: legacy_task_template(EXTRACTION_PROMPT_TEMPLATE),
+    }
+}
 
-## Chapter ID
-{chapter_id}
+impl Default for PromptSettings {
+    fn default() -> Self {
+        Self { system: DEFAULT_SYSTEM_PROMPT.into(), user_template: DEFAULT_USER_TEMPLATE.into(),
+            consistency: default_consistency_prompt(), memory: default_memory_prompt() }
+    }
+}
 
-## Author Chapter Idea
-{idea}
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct PromptPair {
+    system: String,
+    user: String,
+}
 
-## Target Length
-约 {target_words} 中文字
+#[derive(Serialize, Deserialize, Clone)]
+struct PromptPreview {
+    prompts: PromptPair,
+    source: String,
+    stats: context::Stats,
+}
 
-## Story Bible
-{story_bible}
+#[derive(Serialize, Deserialize, Clone)]
+struct PromptOverride {
+    prompts: PromptPair,
+    source: String,
+}
 
-## Characters
-{characters}
+fn load_prompt_settings(project_dir: &Path) -> Result<PromptSettings, String> {
+    match fs::read_to_string(project_dir.join(".prompt-settings.json")) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("提示词设置读取失败: {}", e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(PromptSettings::default()),
+        Err(e) => Err(e.to_string()),
+    }
+}
 
-## Book Outline
-{book_outline}
+const PROMPT_VARIABLES: &[&str] = &[
+    "人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID", "章节正文", "世界观规则", "伏笔", "近期事件", "时间线",
+];
 
-## Recent Chapter Summaries
-{summaries}
+// 单次扫描模板；资料里的 {{...}} 不会被再次替换或当作模板执行。
+fn render_prompt_template(template: &str, values: &[(String, String)]) -> Result<String, String> {
+    let mut rest = template;
+    let mut output = String::new();
+    while let Some(start) = rest.find("{{") {
+        output.push_str(&rest[..start]);
+        let tail = &rest[start + 2..];
+        let end = tail.find("}}").ok_or("模板变量缺少 }}")?;
+        let name = tail[..end].trim();
+        if !PROMPT_VARIABLES.contains(&name) {
+            return Err(format!("未知提示词变量: {{{{{}}}}}", name));
+        }
+        output.push_str(values.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()).unwrap_or(""));
+        rest = &tail[end + 2..];
+    }
+    output.push_str(rest);
+    Ok(output)
+}
 
-## Recent Events
-{events}
+fn validate_task_prompt(system: &str, template: &str, allowed: &[&str], required: &str) -> Result<(), String> {
+    if system.trim().is_empty() || template.trim().is_empty() {
+        return Err("系统提示词和任务提示词模板不能为空".into());
+    }
+    render_prompt_template(template, &[])?;
+    let re = regex::Regex::new(r"\{\{([^{}]+)\}\}").unwrap();
+    let mut has_required = false;
+    for caps in re.captures_iter(template) {
+        let name = caps[1].trim();
+        if !allowed.contains(&name) { return Err(format!("当前分类不支持变量: {}", name)); }
+        has_required |= name == required;
+    }
+    if !has_required { return Err(format!("模板必须包含 {{{{{}}}}}", required)); }
+    Ok(())
+}
 
-## Timeline
-{timeline}
+fn validate_prompt_settings(settings: &PromptSettings) -> Result<(), String> {
+    validate_task_prompt(&settings.system, &settings.user_template,
+        &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], "事件骨架")?;
+    validate_task_prompt(&settings.consistency.system, &settings.consistency.user_template,
+        &["章节ID", "章节正文", "事件骨架", "人物状态", "世界观规则", "伏笔", "近期事件", "时间线"], "章节正文")?;
+    validate_task_prompt(&settings.memory.system, &settings.memory.user_template,
+        &["章节ID", "章节正文", "人物状态", "伏笔"], "章节正文")
+}
 
-## Active Foreshadowing
-{foreshadowing}
+fn assemble_task_prompt(task: &TaskPrompt, values: &[(String, String)], settings: &Settings) -> Result<PromptPair, String> {
+    Ok(PromptPair { system: task.system.clone(), user: apply_no_think(render_prompt_template(&task.user_template, values)?, settings) })
+}
 
-## Style References
-{style}
+fn render_generation_template(template: &str, values: &[(String, String)]) -> Result<String, String> {
+    let variable = regex::Regex::new(r"\{\{([^{}]+)\}\}").unwrap();
+    let mut blocks: Vec<String> = vec![String::new()];
+    for line in template.lines() {
+        if line.trim().starts_with('【') && line.trim().contains('】') { blocks.push(String::new()); }
+        blocks.last_mut().unwrap().push_str(line);
+        blocks.last_mut().unwrap().push('\n');
+    }
+    let mut kept = String::new();
+    for block in blocks {
+        let names: Vec<_> = variable.captures_iter(&block).map(|c| c[1].trim().to_string()).collect();
+        if !names.is_empty() && names.iter().all(|n| values.iter().find(|(k, _)| k == n).map_or(true, |(_, v)| v.trim().is_empty())) { continue; }
+        kept.push_str(&block);
+    }
+    render_prompt_template(kept.trim(), values)
+}
 
-{form_block}
-## Hard Rules For This Chapter
-- 只写本章正文
-- 不要写章节分析
-- 不要输出 markdown 标题
-- 不要重复前文已发生事件
-- 不要在本章内部重复同一个发现、奖励、任务、冲突或转折
-- 结尾可以留钩子，但不要提前进入下一章主要剧情"#,
-        chapter_id = chapter_id,
-        idea = idea,
-        target_words = target_words,
-        story_bible = get("Story Bible"),
-        characters = get("Characters"),
-        book_outline = get("Book Outline"),
-        summaries = get("Recent Chapter Summaries"),
-        events = get("Recent Events"),
-        timeline = get("Timeline"),
-        foreshadowing = get("Active Foreshadowing"),
-        style = get("Style References"),
-        form_block = form_block,
-    )
+fn normalize_idea(idea: &str) -> String {
+    let mut lines: Vec<_> = idea.lines().collect();
+    while lines.first().map_or(false, |line| {
+        let title = line.trim().trim_start_matches('#').trim();
+        title.is_empty() || title == "【事件骨架】" || title == "事件骨架"
+    }) { lines.remove(0); }
+    lines.join("\n").trim().to_string()
+}
+
+fn assemble_generation_prompt(
+    project_dir: &Path, settings: &Settings, chapter_id: &str, idea: &str,
+    target_words: u32, mem: &MemorySections, form_block: &str,
+) -> Result<PromptPreview, String> {
+    let template = load_prompt_settings(project_dir)?;
+    validate_prompt_settings(&template)?;
+    let get = |k: &str| mem.sections.get(k).cloned().unwrap_or_default();
+    let combine = |parts: Vec<(&str, String)>| parts.into_iter().filter(|(_, s)| !s.trim().is_empty())
+        .map(|(name, text)| format!("{}：\n{}", name, text)).collect::<Vec<_>>().join("\n\n");
+    let values = vec![
+        ("人物状态".into(), get("Characters")),
+        ("前情".into(), combine(vec![("直接前情与参考章", get("Recent Chapter Summaries")), ("相关历史事件（已合并时间信息）", get("Recent Events"))])),
+        ("相关设定与伏笔".into(), combine(vec![("故事规则", get("Story Bible")), ("作者大纲选段（方向参考，不提前展开）", get("Book Outline")), ("已埋下的相关线索", get("Active Foreshadowing"))])),
+        ("文风参考".into(), get("Style References")),
+        ("事件骨架".into(), normalize_idea(idea)),
+        ("目标字数".into(), target_words.to_string()),
+        ("叙事要求".into(), form_block.into()),
+        ("章节ID".into(), chapter_id.into()),
+    ];
+    let user = render_generation_template(&template.user_template, &values)?;
+    let variables: std::collections::HashSet<String> = regex::Regex::new(r"\{\{([^{}]+)\}\}").unwrap()
+        .captures_iter(&template.user_template).map(|c| c[1].trim().to_string()).collect();
+    let uses_state = values.iter().any(|(key, value)| ["人物状态", "前情", "相关设定与伏笔"].contains(&key.as_str()) && variables.contains(key) && !value.trim().is_empty());
+    let user = if uses_state {
+        format!("【资料使用原则】\n以下人物状态与前情描述本章开始前的情况；本章可按事件骨架取得物品、获知信息或改变状态。章初的‘尚未’不等于本章禁止发生；骨架未安排的未来事项不得自行展开。\n\n{}", user)
+    } else { user };
+    let prompts = PromptPair { system: template.system, user: apply_no_think(user, settings) };
+    // 包含项目和调用输入，防止跨项目、跨章或修改设置后误用旧预览。
+    let source = serde_json::to_string(&(project_dir, chapter_id, idea, target_words,
+        settings.llm_provider.as_deref(), settings.disable_thinking, &prompts)).map_err(|e| e.to_string())?;
+    let mut stats = mem.stats.clone();
+    for source in &mut stats.sources {
+        let key = match source.kind.as_str() {
+            "character" => "人物状态", "summary" | "event" | "chapter" => "前情",
+            "style" => "文风参考", _ => "相关设定与伏笔",
+        };
+        if source.included && !variables.contains(key) {
+            source.included = false;
+            source.reason = "模板未引用此类资料，未发送".into();
+        }
+    }
+    stats.characters = prompts.system.chars().count() + prompts.user.chars().count();
+    stats.estimated_tokens = context::tokens(&prompts.system) + context::tokens(&prompts.user);
+    stats.over_budget = stats.estimated_tokens > stats.budget;
+    if stats.over_budget { stats.warnings.push("输入超过预算，请减少自动资料、参考章或在预览中精简后确认；软件不会静默丢弃手动选择。".into()); }
+    if !mem.state_at.is_empty() { stats.warnings.push(mem.state_at.clone()); }
+    Ok(PromptPreview { prompts, source, stats })
+}
+
+fn prepare_generation(
+    root: &Path, settings: &Settings, id: &str, idea: &str, target_words: u32,
+    use_context: bool, pov: &str, narrative: &str, options: &context::Options,
+) -> Result<(PromptPreview, MemorySections), String> {
+    let mem = context::build(root, id, idea, use_context, options)?;
+    let form = if !use_context || mem.stats.warnings.iter().any(|w| w.contains("快照")) {
+        build_form_block(pov, &narrative.split(|c| c == ',' || c == '，' || c == '\n').map(str::to_string).collect::<Vec<_>>())
+    } else { generation_form(root, pov, narrative) };
+    let mut preview = assemble_generation_prompt(root, settings, id, idea, target_words, &mem, &form)?;
+    preview.source = serde_json::to_string(&(&preview.source, options, project_source::chapter_path(root, id)?)).map_err(|e| e.to_string())?;
+    Ok((preview, mem))
+}
+
+fn generation_form(project_dir: &Path, pov: &str, narrative: &str) -> String {
+    let (default_pov, default_directives) = read_narrative_defaults(project_dir);
+    let effective_pov = if pov.trim().is_empty() { default_pov } else { pov.trim().to_string() };
+    let directives = if narrative.trim().is_empty() { default_directives } else {
+        narrative.split(|c| c == ',' || c == '，' || c == '\n')
+            .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
+    };
+    build_form_block(&effective_pov, &directives)
+}
+
+fn choose_generation_prompt(preview: PromptPreview, custom: Option<PromptOverride>) -> Result<PromptPair, String> {
+    let limit = preview.stats.budget;
+    let prompts = match custom {
+        Some(custom) => {
+            if custom.source != preview.source { return Err("提示词来源已变化，请重新打开提示词预览并确认。".into()); }
+            custom.prompts
+        }
+        None => preview.prompts,
+    };
+    if prompts.system.trim().is_empty() || prompts.user.trim().is_empty() { return Err("系统提示词和章节提示词不能为空".into()); }
+    if context::tokens(&prompts.system) + context::tokens(&prompts.user) > limit {
+        return Err("实际输入超过上下文预算，请精简预览或提高输入预算后重新确认。".into());
+    }
+    Ok(prompts)
+}
+
+#[tauri::command]
+fn context_catalog(app: tauri::AppHandle, chapter_id: String) -> Result<context::Catalog, String> {
+    context::catalog(&resolve_project_dir(&app), &chapter_id)
+}
+
+#[tauri::command]
+fn get_source_settings(app: tauri::AppHandle) -> Result<project_source::SourceSettings, String> {
+    project_source::load(&resolve_project_dir(&app))
+}
+
+#[tauri::command]
+fn save_source_settings(app: tauri::AppHandle, settings: project_source::SourceSettings) -> Result<(), String> {
+    if settings.directory.trim().is_empty() { return Err("正文目录不能为空".into()); }
+    let root = resolve_project_dir(&app);
+    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    fs::write(root.join(".chapter-source.json"), text).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_prompt_settings(app: tauri::AppHandle) -> Result<PromptSettings, String> {
+    load_prompt_settings(&resolve_project_dir(&app))
+}
+
+#[tauri::command]
+fn default_prompt_settings() -> PromptSettings { PromptSettings::default() }
+
+#[tauri::command]
+fn save_prompt_settings(app: tauri::AppHandle, settings: PromptSettings) -> Result<(), String> {
+    validate_prompt_settings(&settings)?;
+    let path = resolve_project_dir(&app).join(".prompt-settings.json");
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    fs::rename(temp, path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn preview_generation_prompt(app: tauri::AppHandle, chapter_id: String, idea: String,
+    target_words: u32, use_context: bool, pov: String, narrative: String, context_options: Option<context::Options>,
+) -> Result<PromptPreview, String> {
+    let project_dir = resolve_project_dir(&app);
+    ensure_project_initialized(&project_dir, &app);
+    let settings = load_settings(&app);
+    prepare_generation(&project_dir, &settings, &chapter_id, &idea, target_words, use_context,
+        &pov, &narrative, &context_options.unwrap_or_default()).map(|(preview, _)| preview)
 }
 
 /// 把 POV 预设展开成英文指令；并组装「形式 / 叙事控制」英文区块。
 /// 经验:形式(POV/规则)用英文表述更能贴合模型 CoT，内容(idea/记忆)保持中文。
 fn build_form_block(pov: &str, directives: &[String]) -> String {
+    let mut lines = Vec::new();
     let pov = pov.trim();
-    let pov_line = if pov.is_empty() {
-        "Follow the story's established/default point of view.".to_string()
-    } else if let Some(rest) = pov.strip_prefix("objective") {
-        let _ = rest;
-        "Objective / observer POV: an invisible external observer (camera & microphone). \
-Describe ONLY what is outwardly visible and audible. Do NOT state any character's thoughts, \
-feelings, intentions, memories, or unstated knowledge — reveal interior states only through \
-visible action, speech, and physical detail."
-            .to_string()
-    } else if let Some(c) = pov.strip_prefix("limited:").or_else(|| pov.strip_prefix("limited")) {
-        let who = c.trim_start_matches(':').trim();
-        if who.is_empty() {
-            "Close third-person limited. Interiority is allowed ONLY for the single POV character; \
-other characters are observed from outside.".to_string()
-        } else {
-            format!(
-                "Close third-person limited on 「{who}」. Interiority is allowed ONLY for 「{who}」; \
-all other characters are observed strictly from the outside.",
-                who = who
-            )
-        }
-    } else if let Some(c) = pov.strip_prefix("first:").or_else(|| pov.strip_prefix("first")) {
-        let who = c.trim_start_matches(':').trim();
-        if who.is_empty() {
-            "First-person narration by the POV character.".to_string()
-        } else {
-            format!("First-person narration by 「{who}」.", who = who)
-        }
-    } else if pov.starts_with("omniscient") {
-        "Omniscient narration (use sparingly; avoid head-hopping within a single scene)."
-            .to_string()
-    } else {
-        // 自由描述,原样作为 POV 指令
-        pov.to_string()
-    };
-
-    let directives_text = if directives.is_empty() {
-        "（none specified — rely on the Story Bible's tone）".to_string()
-    } else {
-        directives
-            .iter()
-            .map(|d| format!("- {}", d.trim()))
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-
-    format!(
-        r#"## Form & Narrative Control (FORM — follow strictly; this overrides generic writing habits)
-
-### Point of View
-{pov_line}
-
-### Narrative Directives
-{directives_text}
-
-### Formal Rules
-- Honor the Point of View above without exception.
-- Items flagged with `dramatize: true` (in foreshadowing / outline) MUST be rendered as a concrete in-scene beat experienced by the POV character (e.g. 「王二注意到……」), NOT summarized or delivered as authorial exposition.
-- Resolve every action to an explicitly named character using the Characters list. The idea / outline / summaries may use loose pronouns; a parenthetical such as 「他(王二)」 is AUTHORITATIVE — the name in parentheses is the true referent. Never swap who performs an action with who receives it.
-
-"#,
-        pov_line = pov_line,
-        directives_text = directives_text,
-    )
+    if pov == "objective" { lines.push("客观旁观视角：只写可见动作和可听言语，不直接进入人物内心。".to_string()); }
+    else if let Some(who) = pov.strip_prefix("limited") { lines.push(format!("第三人称限制视角：{}；其他角色的心理通过其言行呈现。", who.trim_start_matches(':'))); }
+    else if let Some(who) = pov.strip_prefix("first") { lines.push(format!("第一人称视角：{}。", who.trim_start_matches(':'))); }
+    else if pov == "omniscient" { lines.push("全知视角，场景内避免无过渡切换人物视角。".into()); }
+    else if !pov.is_empty() { lines.push(pov.into()); }
+    for directive in directives { if !directive.trim().is_empty() { lines.push(directive.trim().into()); } }
+    lines.join("\n")
 }
 
 /// 读取 story_bible.yaml 的书级叙事默认：narrative_defaults: { pov, directives: [...] }
@@ -975,6 +978,8 @@ fn do_generate_chapter(
     overwrite: bool,
     pov: &str,
     narrative: &str,
+    prompt_override: Option<PromptOverride>,
+    context_options: context::Options,
 ) -> CommandResult {
     let config = match build_run_config(app) {
         Ok(c) => c,
@@ -982,11 +987,10 @@ fn do_generate_chapter(
     };
     let settings = load_settings(app);
 
-    let chapter_path = config
-        .project_dir
-        .join("chapters")
-        .join(chapter_id)
-        .join("chapter.md");
+    let chapter_path = match project_source::chapter_path(&config.project_dir, chapter_id) {
+        Ok(p) => p,
+        Err(e) => return CommandResult { success: false, log: e },
+    };
 
     if chapter_path.exists() && !overwrite {
         return CommandResult {
@@ -995,23 +999,16 @@ fn do_generate_chapter(
         };
     }
 
-    // 叙事控制：章级输入优先，回退到 story_bible.narrative_defaults（书级默认）
-    let (default_pov, default_directives) = read_narrative_defaults(&config.project_dir);
-    let effective_pov = if pov.trim().is_empty() { default_pov } else { pov.trim().to_string() };
-    let effective_directives: Vec<String> = if narrative.trim().is_empty() {
-        default_directives
-    } else {
-        narrative
-            .split(|c| c == ',' || c == '，' || c == '\n')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
+    let (preview, mem) = match prepare_generation(&config.project_dir, &settings, chapter_id, idea,
+        target_words, use_context, pov, narrative, &context_options) {
+        Ok(p) => p, Err(e) => return CommandResult { success: false, log: e },
     };
-    let form_block = build_form_block(&effective_pov, &effective_directives);
-
-    let mem = build_memory_sections(&config.project_dir, use_context);
-    let user_prompt = build_user_prompt(chapter_id, idea, target_words, &mem.sections, &form_block);
-    let context_tokens = simple_token_estimate(&user_prompt);
+    let prompts = match choose_generation_prompt(preview, prompt_override) {
+        Ok(p) => p,
+        Err(e) => return CommandResult { success: false, log: e },
+    };
+    let user_prompt = prompts.user;
+    let context_tokens = context::tokens(&prompts.system) + context::tokens(&user_prompt);
     let conflict_warnings = if use_context {
         detect_potential_conflicts(idea, &mem.conflict_sources)
     } else {
@@ -1024,7 +1021,7 @@ fn do_generate_chapter(
     log.push_str(&format!("[信息] 使用长期记忆: {}\n", use_context));
     log.push_str(&format!("[信息] prompt token 估算: ~{}\n", context_tokens));
 
-    let messages = sys_user_messages(SYSTEM_PROMPT, &apply_no_think(user_prompt.clone(), &settings));
+    let messages = sys_user_messages(&prompts.system, &user_prompt);
 
     let temperature = settings.temperature.unwrap_or(0.8);
     let top_p = settings.top_p.unwrap_or(0.9);
@@ -1050,7 +1047,9 @@ fn do_generate_chapter(
 
     let output_text = clean_output(&raw_response);
 
-    write_text(&chapter_path, &output_text);
+    if let Err(e) = project_source::write(&config.project_dir, &chapter_path, &output_text) {
+        return CommandResult { success: false, log: format!("正文保存失败：{}", e) };
+    }
     log.push_str(&format!("[完成] 章节正文已保存: {}\n", chapter_path.display()));
 
     write_generation_report(
@@ -1177,11 +1176,10 @@ fn do_check_consistency(app: &tauri::AppHandle, chapter_id: &str) -> CommandResu
     };
     let settings = load_settings(app);
 
-    let chapter_path = config
-        .project_dir
-        .join("chapters")
-        .join(chapter_id)
-        .join("chapter.md");
+    let chapter_path = match project_source::chapter_path(&config.project_dir, chapter_id) {
+        Ok(p) => p,
+        Err(e) => return CommandResult { success: false, log: e },
+    };
 
     if !chapter_path.exists() {
         return CommandResult {
@@ -1203,104 +1201,30 @@ fn do_check_consistency(app: &tauri::AppHandle, chapter_id: &str) -> CommandResu
 
     let chapter_idea = load_chapter_idea(&config.project_dir, chapter_id);
 
-    let characters = load_yaml(&config.project_dir.join("memory").join("characters.yaml"));
-    let story_bible = load_yaml(&config.project_dir.join("memory").join("story_bible.yaml"));
-    let foreshadowing = load_yaml(&config.project_dir.join("memory").join("foreshadowing.yaml"));
-    let events = read_jsonl(&config.project_dir.join("memory").join("events.jsonl"));
-    let timeline = read_jsonl(&config.project_dir.join("memory").join("timeline.jsonl"));
-
-    let recent_events: Vec<&serde_json::Value> =
-        events.iter().rev().take(20).rev().collect();
-    let recent_timeline: Vec<&serde_json::Value> =
-        timeline.iter().rev().take(20).rev().collect();
-
-    let characters_text = serde_json::to_string_pretty(&characters).unwrap_or_default();
-
-    // 世界观规则文本
-    let world_rules = story_bible
-        .get("world_rules")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| format!("- {}", s))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    let writing_rules = story_bible
-        .get("writing_rules")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| format!("- {}", s))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    let forbidden = story_bible
-        .get("forbidden_patterns")
-        .and_then(|v| v.as_sequence())
-        .map(|seq| {
-            seq.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| format!("- {}", s))
-                .collect::<Vec<_>>()
-                .join("\n")
-        })
-        .unwrap_or_default();
-    let world_rules_text = format!(
-        "世界观规则:\n{}\n\n写作规则:\n{}\n\n禁止模式:\n{}",
-        world_rules, writing_rules, forbidden
-    );
-
-    let foreshadowing_text =
-        serde_json::to_string_pretty(&foreshadowing).unwrap_or_default();
-
-    let events_text = if recent_events.is_empty() {
-        "（暂无事件记录）".to_string()
-    } else {
-        recent_events
-            .iter()
-            .map(|e| {
-                let eid = e.get("event_id").and_then(|v| v.as_str()).unwrap_or("?");
-                let desc = e.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                format!("- [{}] {}", eid, desc)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    let selected = match context::build(&config.project_dir, chapter_id, &chapter_idea, true, &context::Options::default()) {
+        Ok(m) => m, Err(e) => return CommandResult { success: false, log: e },
     };
+    let section = |name: &str| selected.sections.get(name).cloned().unwrap_or_default();
+    let characters_text = section("Characters");
+    let world_rules_text = section("Story Bible");
+    let foreshadowing_text = section("Active Foreshadowing");
+    let events_text = format!("{}\n{}", section("Recent Chapter Summaries"), section("Recent Events"));
+    let timeline_text = String::new();
 
-    let timeline_text = if recent_timeline.is_empty() {
-        "（暂无时间线记录）".to_string()
-    } else {
-        recent_timeline
-            .iter()
-            .map(|t| {
-                let eid = t.get("event_id").and_then(|v| v.as_str()).unwrap_or("?");
-                let time = t.get("time").and_then(|v| v.as_str()).unwrap_or("");
-                let desc = t.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                format!("- [{}] {}: {}", eid, time, desc)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    let templates = match load_prompt_settings(&config.project_dir) {
+        Ok(t) => t,
+        Err(e) => return CommandResult { success: false, log: e },
     };
-
-    let prompt = CONSISTENCY_CHECK_PROMPT
-        .replace("{chapter_id}", chapter_id)
-        .replace("{chapter_text}", &chapter_text)
-        .replace("{chapter_idea}", &chapter_idea)
-        .replace("{characters_text}", &characters_text)
-        .replace("{world_rules_text}", &world_rules_text)
-        .replace("{foreshadowing_text}", &foreshadowing_text)
-        .replace("{events_text}", &events_text)
-        .replace("{timeline_text}", &timeline_text);
-
-    let messages = sys_user_messages(
-        "你是一位专业的小说编辑，专注于连续性审查。请用中文输出报告。",
-        &apply_no_think(prompt.clone(), &settings),
-    );
+    let prompts = match assemble_task_prompt(&templates.consistency, &[
+        ("章节ID".into(), chapter_id.into()), ("章节正文".into(), chapter_text.clone()),
+        ("事件骨架".into(), chapter_idea), ("人物状态".into(), characters_text),
+        ("世界观规则".into(), world_rules_text), ("伏笔".into(), foreshadowing_text),
+        ("近期事件".into(), events_text), ("时间线".into(), timeline_text),
+    ], &settings) {
+        Ok(p) => p,
+        Err(e) => return CommandResult { success: false, log: e },
+    };
+    let messages = sys_user_messages(&prompts.system, &prompts.user);
 
     let top_p = settings.top_p.unwrap_or(0.9);
 
@@ -1430,6 +1354,30 @@ const EXTRACTION_PROMPT_TEMPLATE: &str = r#"你是一位专业的小说编辑助
     }
   ]
 }"#;
+
+// 用户可以编辑抽取模板，但写入前必须确认仍符合程序依赖的输出结构。
+fn validate_memory_extraction(data: &serde_json::Value, chapter_id: &str) -> Result<(), String> {
+    if data.get("chapter_id").and_then(|v| v.as_str()) != Some(chapter_id) {
+        return Err("记忆输出的 chapter_id 与当前章节不一致，未写入记忆".into());
+    }
+    if data.get("chapter_summary").and_then(|v| v.as_str()).map_or(true, |s| s.trim().is_empty()) {
+        return Err("记忆输出缺少非空 chapter_summary，未写入记忆".into());
+    }
+    for field in ["events", "character_updates", "foreshadowing_updates", "relationship_updates", "continuity_risks"] {
+        if !data.get(field).map_or(false, |v| v.is_array()) {
+            return Err(format!("记忆输出的 {} 必须为数组，未写入记忆", field));
+        }
+    }
+    for event in data["events"].as_array().unwrap() {
+        if event.get("description").and_then(|v| v.as_str()).map_or(true, |s| s.trim().is_empty()) {
+            return Err("记忆事件缺少 description，未写入记忆".into());
+        }
+        if let Some(id) = event.get("chapter_id") {
+            if id.as_str() != Some(chapter_id) { return Err("事件章号不一致，未写入记忆".into()); }
+        }
+    }
+    Ok(())
+}
 
 /// 从模型输出中提取 JSON（移植 Python 的 parse_extraction_json）
 fn parse_extraction_json(raw_output: &str) -> Result<serde_json::Value, String> {
@@ -2187,12 +2135,17 @@ fn do_update_memory(app: &tauri::AppHandle, chapter_id: &str) -> CommandResult {
         Err(e) => return CommandResult { success: false, log: e },
     };
     let settings = load_settings(app);
+    let latest = context::jsonl(&config.project_dir.join("memory/chapter_summaries.jsonl")).unwrap_or_default()
+        .iter().filter_map(|v| v.get("chapter_id").and_then(|x| x.as_str()).and_then(project_source::number)).max().unwrap_or(0);
+    if project_source::number(chapter_id).map_or(true, |n| n < latest) {
+        return CommandResult { success: false, log: "旧章更新会覆盖后续人物状态，已停止。请先处理后续记忆或从当前最新章更新。".into() };
+    }
 
-    let chapter_path = config
-        .project_dir
-        .join("chapters")
-        .join(chapter_id)
-        .join("chapter.md");
+
+    let chapter_path = match project_source::chapter_path(&config.project_dir, chapter_id) {
+        Ok(p) => p,
+        Err(e) => return CommandResult { success: false, log: e },
+    };
 
     if !chapter_path.exists() {
         return CommandResult {
@@ -2228,31 +2181,21 @@ fn do_update_memory(app: &tauri::AppHandle, chapter_id: &str) -> CommandResult {
     let foreshadowing =
         load_yaml(&config.project_dir.join("memory").join("foreshadowing.yaml"));
 
-    let characters_text = serde_json::to_string_pretty(
-        &serde_json::from_str::<serde_json::Value>(
-            &serde_yaml::to_string(&characters).unwrap_or_default(),
-        )
-        .unwrap_or(serde_json::Value::Null),
-    )
-    .unwrap_or_default();
-    let foreshadowing_text = serde_json::to_string_pretty(
-        &serde_json::from_str::<serde_json::Value>(
-            &serde_yaml::to_string(&foreshadowing).unwrap_or_default(),
-        )
-        .unwrap_or(serde_json::Value::Null),
-    )
-    .unwrap_or_default();
-
-    let prompt = EXTRACTION_PROMPT_TEMPLATE
-        .replace("{chapter_id}", chapter_id)
-        .replace("{chapter_text}", &chapter_text)
-        .replace("{characters_text}", &characters_text)
-        .replace("{foreshadowing_text}", &foreshadowing_text);
-
-    let messages = sys_user_messages(
-        "你只输出严格合法的JSON，不输出任何其他文本。",
-        &apply_no_think(prompt.clone(), &settings),
-    );
+    // YAML Value 可直接序列化成 JSON；不能把 YAML 文本当成 JSON 再解析。
+    let characters_text = serde_json::to_string_pretty(&characters).unwrap_or_default();
+    let foreshadowing_text = serde_json::to_string_pretty(&foreshadowing).unwrap_or_default();
+    let templates = match load_prompt_settings(&config.project_dir) {
+        Ok(t) => t,
+        Err(e) => return CommandResult { success: false, log: e },
+    };
+    let prompts = match assemble_task_prompt(&templates.memory, &[
+        ("章节ID".into(), chapter_id.into()), ("章节正文".into(), chapter_text),
+        ("人物状态".into(), characters_text), ("伏笔".into(), foreshadowing_text),
+    ], &settings) {
+        Ok(p) => p,
+        Err(e) => return CommandResult { success: false, log: e },
+    };
+    let messages = sys_user_messages(&prompts.system, &prompts.user);
 
     let top_p = settings.top_p.unwrap_or(0.85);
 
@@ -2294,10 +2237,23 @@ fn do_update_memory(app: &tauri::AppHandle, chapter_id: &str) -> CommandResult {
         }
     };
 
-    log.push_str("[成功] JSON 解析成功\n");
+    if let Err(e) = validate_memory_extraction(&data, chapter_id) {
+        let fail_path = config.project_dir.join("outputs").join("reports").join(format!("{}_memory_schema_failed.md", chapter_id));
+        write_text(&fail_path, &format!("{}\n\n{}", e, raw_output));
+        return CommandResult { success: false, log: format!("{}[错误] {}", log, e) };
+    }
+    log.push_str("[成功] JSON 解析及结构校验成功\n");
     log.push_str("[信息] 正在应用记忆更新...\n");
 
+    if latest > 0 {
+        if let Err(e) = context::snapshot(&config.project_dir, &format!("ch{:03}", latest)) {
+            return CommandResult { success: false, log: format!("更新前状态快照保存失败：{}", e) };
+        }
+    }
     apply_memory_updates(&data, chapter_id, &config.project_dir);
+    if let Err(e) = context::snapshot(&config.project_dir, chapter_id) {
+        log.push_str(&format!("[警告] 记忆已更新，但状态快照保存失败：{}\n", e));
+    }
     generate_memory_report(&data, chapter_id, &raw_output, &config.project_dir);
 
     log.push_str(&format!(
@@ -2367,18 +2323,14 @@ fn do_reset_chapter(
     let mut log = String::new();
 
     // 删除章节目录
-    let chapter_dir = config.project_dir.join("chapters").join(chapter_id);
-    if chapter_dir.exists() {
-        if let Err(e) = fs::remove_dir_all(&chapter_dir) {
-            log.push_str(&format!("[错误] 删除 {} 失败: {}\n", chapter_dir.display(), e));
-        } else {
-            log.push_str(&format!("[删除] {}\n", chapter_dir.display()));
+    let chapter_path = match project_source::chapter_path(&config.project_dir, chapter_id) {
+        Ok(p) => p, Err(e) => return CommandResult { success: false, log: e },
+    };
+    if chapter_path.exists() {
+        if let Err(e) = project_source::backup(&config.project_dir, &chapter_path).and_then(|_| fs::remove_file(&chapter_path).map_err(|e| e.to_string())) {
+            return CommandResult { success: false, log: e };
         }
-    } else {
-        log.push_str(&format!(
-            "[跳过] 章节目录不存在: {}\n",
-            chapter_dir.display()
-        ));
+        log.push_str(&format!("[删除并备份] {}\n", chapter_path.display()));
     }
 
     // 删除报告文件
@@ -2407,6 +2359,15 @@ fn do_reset_chapter(
 
     // 处理记忆过滤
     if include_memory {
+        let metadata_path = config.project_dir.join("memory/state_metadata.json");
+        let mut metadata: serde_json::Value = fs::read_to_string(&metadata_path).ok()
+            .and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_else(|| serde_json::json!({}));
+        let n = project_source::number(chapter_id).unwrap_or(0);
+        let prior = metadata.get("invalid_from").and_then(|v| v.as_u64()).unwrap_or(n as u64);
+        metadata["invalid_from"] = serde_json::json!(prior.min(n as u64));
+        if let Err(e) = fs::write(&metadata_path, serde_json::to_string(&metadata).unwrap_or_default()) {
+            return CommandResult { success: false, log: format!("状态失效标记保存失败：{}", e) };
+        }
         log.push_str(&filter_memory_records(chapter_id, &config.project_dir));
     } else {
         log.push_str("[信息] 未删除长期记忆。需要时可勾选「同时清除记忆」。\n");
@@ -2431,43 +2392,21 @@ fn get_pipeline_root(app: tauri::AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn list_chapters(app: tauri::AppHandle) -> Result<Vec<String>, String> {
     let config = build_run_config(&app)?;
-    let chapters_dir = config.project_dir.join("chapters");
-    let mut ids: Vec<String> = Vec::new();
-    if let Ok(entries) = fs::read_dir(&chapters_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    ids.push(name.to_string());
-                }
-            }
-        }
-    }
-    ids.sort();
-    Ok(ids)
+    Ok(project_source::chapters(&config.project_dir)?.keys().map(|n| format!("ch{:03}", n)).collect())
 }
 
 #[tauri::command]
 fn read_chapter(app: tauri::AppHandle, chapter_id: String) -> Result<String, String> {
     let config = build_run_config(&app)?;
-    let path = config
-        .project_dir
-        .join("chapters")
-        .join(&chapter_id)
-        .join("chapter.md");
+    let path = project_source::chapter_path(&config.project_dir, &chapter_id)?;
     Ok(read_text(&path))
 }
 
 #[tauri::command]
-fn save_chapter(
-    app: tauri::AppHandle,
-    chapter_id: String,
-    content: String,
-) -> Result<(), String> {
+fn save_chapter(app: tauri::AppHandle, chapter_id: String, content: String) -> Result<(), String> {
     let config = build_run_config(&app)?;
-    let dir = config.project_dir.join("chapters").join(&chapter_id);
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    fs::write(dir.join("chapter.md"), content).map_err(|e| e.to_string())
+    let path = project_source::chapter_path(&config.project_dir, &chapter_id)?;
+    project_source::write(&config.project_dir, &path, &content)
 }
 
 #[tauri::command]
@@ -2552,6 +2491,8 @@ async fn generate_chapter(
     overwrite: bool,
     pov: Option<String>,
     narrative: Option<String>,
+    prompt_override: Option<PromptOverride>,
+    context_options: Option<context::Options>,
 ) -> Result<CommandResult, String> {
     let pov = pov.unwrap_or_default();
     let narrative = narrative.unwrap_or_default();
@@ -2565,6 +2506,8 @@ async fn generate_chapter(
             overwrite,
             &pov,
             &narrative,
+            prompt_override,
+            context_options.unwrap_or_default(),
         )
     })
     .await
@@ -2642,6 +2585,13 @@ pub fn run() {
             save_memory_file,
             get_settings,
             save_settings,
+            context_catalog,
+            get_source_settings,
+            save_source_settings,
+            get_prompt_settings,
+            default_prompt_settings,
+            save_prompt_settings,
+            preview_generation_prompt,
             generate_chapter,
             check_consistency,
             update_memory,
@@ -2674,6 +2624,141 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("memory")).unwrap();
         dir
+    }
+
+    #[test]
+    fn empty_sections_and_unused_form_rules_are_omitted() {
+        assert!(build_form_block("", &[]).is_empty());
+        assert!(!build_form_block("limited:陆青霜", &[]).contains("王二"));
+        assert_eq!(normalize_idea("## 【事件骨架】\n\n1. 取书。"), "1. 取书。");
+        let output = render_generation_template("【空区块】\n{{人物状态}}\n\n【事件骨架】\n{{事件骨架}}", &[
+            ("人物状态".into(), String::new()), ("事件骨架".into(), "1. 取书。".into()),
+        ]).unwrap();
+        assert!(!output.contains("空区块")); assert!(output.contains("1. 取书。"));
+    }
+
+    #[test]
+    fn over_budget_requires_shortening_and_shared_assembly_preserves_confirmed_prompt() {
+        let dir = temp_project("budget");
+        let settings = Settings::default();
+        let opts = context::Options { input_budget: 500, ..context::Options::default() };
+        let (preview, _) = prepare_generation(&dir, &settings, "ch001", &"长".repeat(800), 4000, false, "", "", &opts).unwrap();
+        assert!(preview.stats.over_budget);
+        assert!(choose_generation_prompt(preview.clone(), None).is_err());
+        let shorter = PromptPair { system: "中文小说助手".into(), user: "只写取书场景".into() };
+        let (fresh, _) = prepare_generation(&dir, &settings, "ch001", &"长".repeat(800), 4000, false, "", "", &opts).unwrap();
+        assert_eq!(fresh.source, preview.source);
+        assert_eq!(choose_generation_prompt(fresh, Some(PromptOverride { prompts: shorter.clone(), source: preview.source })).unwrap(), shorter);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_prompt_settings_keep_generation_and_default_other_tasks() {
+        let old = r#"{"system":"原有系统提示词","user_template":"{{事件骨架}}"}"#;
+        let settings: PromptSettings = serde_json::from_str(old).unwrap();
+        assert_eq!(settings.system, "原有系统提示词");
+        assert_eq!(settings.consistency, default_consistency_prompt());
+        assert_eq!(settings.memory, default_memory_prompt());
+        assert!(validate_prompt_settings(&settings).is_ok());
+        let roundtrip: PromptSettings = serde_json::from_str(&serde_json::to_string(&settings).unwrap()).unwrap();
+        assert_eq!(roundtrip, settings);
+    }
+
+    #[test]
+    fn task_templates_render_json_and_literal_chapter_without_recursive_replacement() {
+        let settings = Settings { disable_thinking: Some(false), ..Settings::default() };
+        let chapter = "陆青霜发现写着 {{章节ID}} 的纸条。";
+        let values = vec![("章节ID".into(), "ch005".into()), ("章节正文".into(), chapter.into()),
+            ("人物状态".into(), "人物资料".into()), ("伏笔".into(), "伏笔资料".into())];
+        let memory = assemble_task_prompt(&default_memory_prompt(), &values, &settings).unwrap();
+        assert!(memory.user.contains(chapter));
+        assert!(memory.user.contains("\"chapter_id\": \"ch005\""));
+        assert!(memory.user.contains("人物资料"));
+        assert!(!memory.user.contains("{chapter_text}"));
+        let mut check = default_consistency_prompt();
+        check.system = "自定义检查系统".into();
+        check.user_template = "只检查正文：{{章节正文}}".into();
+        let rendered = assemble_task_prompt(&check, &values, &settings).unwrap();
+        assert_eq!(rendered.system, "自定义检查系统");
+        assert_eq!(rendered.user, format!("只检查正文：{}", chapter));
+        let yaml: serde_yaml::Value = serde_yaml::from_str("characters:\n  - name: 陆青霜\n").unwrap();
+        let json = serde_json::to_value(&yaml).unwrap();
+        assert_eq!(json["characters"][0]["name"], "陆青霜");
+    }
+
+    #[test]
+    fn memory_contract_rejects_wrong_chapter_and_missing_arrays() {
+        let mut data = json!({"chapter_id":"ch005", "chapter_summary":"获得伪装能力", "events":[],
+            "character_updates":[], "foreshadowing_updates":[], "relationship_updates":[], "continuity_risks":[]});
+        assert!(validate_memory_extraction(&data, "ch005").is_ok());
+        assert!(validate_memory_extraction(&data, "ch006").is_err());
+        data["events"] = json!("错误类型");
+        assert!(validate_memory_extraction(&data, "ch005").is_err());
+    }
+
+    #[test]
+    fn template_validation_and_literal_author_input() {
+        assert!(validate_prompt_settings(&PromptSettings::default()).is_ok());
+        let mut template = PromptSettings::default();
+        template.user_template = "{{不支持的变量}} {{事件骨架}}".into();
+        assert!(validate_prompt_settings(&template).is_err());
+        template.user_template = "{{事件骨架".into();
+        assert!(validate_prompt_settings(&template).is_err());
+        template.user_template = "不含事件骨架".into();
+        assert!(validate_prompt_settings(&template).is_err());
+        let rendered = render_prompt_template("{{事件骨架}} / {{目标字数}}", &[
+            ("事件骨架".into(), "主角看到 {{目标字数}} 字样".into()),
+            ("目标字数".into(), "4000".into()),
+        ]).unwrap();
+        assert_eq!(rendered, "主角看到 {{目标字数}} 字样 / 4000");
+    }
+
+    #[test]
+    fn preview_and_override_preserve_exact_messages() {
+        let dir = temp_project("prompt_exact");
+        let settings = Settings::default();
+        let mem = build_memory_sections(&dir, false);
+        let preview = assemble_generation_prompt(&dir, &settings, "ch001", "1. 进入山谷。", 4000, &mem, "").unwrap();
+        assert!(preview.prompts.user.contains("【事件骨架】\n1. 进入山谷。"));
+        assert!(preview.prompts.user.ends_with("/no_think"));
+        let automatic = choose_generation_prompt(preview.clone(), None).unwrap();
+        assert_eq!(automatic, preview.prompts);
+        // 用户可删除 /no_think；生成路径不可重新追加或重新组装。
+        let edited = PromptPair { system: "自定义系统要求".into(), user: "手动确认的章节提示词".into() };
+        let chosen = choose_generation_prompt(preview.clone(), Some(PromptOverride {
+            prompts: edited.clone(), source: preview.source.clone(),
+        })).unwrap();
+        let messages = sys_user_messages(&chosen.system, &chosen.user);
+        assert_eq!(messages[0].content, edited.system);
+        assert_eq!(messages[1].content, edited.user);
+        let changed = assemble_generation_prompt(&dir, &settings, "ch002", "1. 进入山谷。", 4000, &mem, "").unwrap();
+        assert!(choose_generation_prompt(changed, Some(PromptOverride { prompts: edited, source: preview.source })).is_err());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn prompt_sources_detect_memory_and_template_changes() {
+        let dir = temp_project("prompt_sources");
+        let settings = Settings::default();
+        let preview = |dir: &Path| {
+            let mem = build_memory_sections(dir, true);
+            assemble_generation_prompt(dir, &settings, "ch001", "进入山谷", 4000, &mem, "").unwrap()
+        };
+        let before = preview(&dir);
+        fs::write(dir.join("memory/characters.yaml"), "characters:\n  - name: 主角\n    role: 主角\n    current_status: 疲惫但警惕\n").unwrap();
+        let with_memory = preview(&dir);
+        assert_ne!(before.source, with_memory.source);
+        assert!(with_memory.prompts.user.contains("疲惫但警惕"));
+        let custom = PromptSettings { system: "项目自己的系统提示词".into(), user_template: "【事件骨架】\n{{事件骨架}}".into(), ..PromptSettings::default() };
+        fs::write(dir.join(".prompt-settings.json"), serde_json::to_string(&custom).unwrap()).unwrap();
+        assert_eq!(load_prompt_settings(&dir).unwrap(), custom);
+        let with_template = preview(&dir);
+        assert_ne!(with_memory.source, with_template.source);
+        assert_eq!(with_template.prompts.system, custom.system);
+        assert_eq!(with_template.prompts.user, "【事件骨架】\n进入山谷\n\n/no_think");
+        fs::write(dir.join(".prompt-settings.json"), "broken json").unwrap();
+        assert!(load_prompt_settings(&dir).is_err());
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

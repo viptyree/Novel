@@ -1,24 +1,29 @@
-import { useEffect, useState } from "react";
-import { api, CommandResult } from "../api";
+import { useEffect, useRef, useState } from "react";
+import { api, CommandResult, PromptPreview, ContextOptions, ContextCatalog, defaultContextOptions } from "../api";
 import { useT } from "../i18n";
+import ContextControls, { ContextReport, estimateTokens } from "./ContextControls";
 import { Banner, Field, LogBox, Spinner } from "./common";
 
 interface Props {
+  promptRevision: number;
   chapters: string[];
   currentChapter: string;
   setCurrentChapter: (id: string) => void;
   refreshChapters: () => Promise<void>;
 }
 
-type Busy = "" | "generate" | "consistency" | "memory" | "reset" | "save";
+type Busy = "" | "generate" | "consistency" | "memory" | "reset" | "save" | "preview";
 
 export default function ChapterWorkbench({
   chapters,
+  promptRevision,
   currentChapter,
   setCurrentChapter,
   refreshChapters,
 }: Props) {
   const t = useT();
+  const [contextOptions, setContextOptions] = useState<ContextOptions>({ ...defaultContextOptions });
+  const [catalog, setCatalog] = useState<ContextCatalog | null>(null);
   const [newId, setNewId] = useState("");
   const [idea, setIdea] = useState("");
   const [targetWords, setTargetWords] = useState(4000);
@@ -30,6 +35,51 @@ export default function ChapterWorkbench({
   const [povMode, setPovMode] = useState("");
   const [povChar, setPovChar] = useState("");
   const [narrative, setNarrative] = useState("");
+
+  const [confirmedPrompt, setConfirmedPrompt] = useState<PromptPreview | undefined>();
+  const [confirmedInput, setConfirmedInput] = useState("");
+  const [draftPrompt, setDraftPrompt] = useState<PromptPreview | null>(null);
+  const [freshPrompt, setFreshPrompt] = useState<PromptPreview | null>(null);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const inputKey = JSON.stringify([promptRevision, currentChapter || newId, idea.trim(), targetWords, useContext, povMode, povChar, narrative.trim(), contextOptions]);
+  const promptStale = !!confirmedPrompt && confirmedInput !== inputKey;
+
+  useEffect(() => {
+    setConfirmedPrompt(undefined); setConfirmedInput("");
+    setContextOptions((o) => ({ ...o, characters: [], chapters: [], events: [] }));
+  }, [(currentChapter || newId).trim()]);
+  useEffect(() => {
+    if (draftPrompt && !dialogRef.current?.open) dialogRef.current?.showModal();
+  }, [draftPrompt]);
+
+  async function onPreview() {
+    const id = (currentChapter || newId).trim();
+    if (!id || !idea.trim()) {
+      setBanner({ kind: "err", msg: t(!id ? "wb.needChapter" : "wb.needIdea") });
+      return;
+    }
+    setBusy("preview");
+    try {
+      const fresh = await api.previewPrompt(id, idea.trim(), targetWords, useContext, buildPov(), narrative.trim(), contextOptions);
+      setFreshPrompt(fresh);
+      setDraftPrompt(confirmedPrompt ? { ...confirmedPrompt, stats: fresh.stats } : fresh);
+    } catch (e) {
+      setBanner({ kind: "err", msg: String(e) });
+    } finally { setBusy(""); }
+  }
+
+  function closePreview() {
+    dialogRef.current?.close();
+    setDraftPrompt(null);
+    setFreshPrompt(null);
+  }
+
+  function confirmPreview() {
+    if (!draftPrompt || !freshPrompt) return;
+    setConfirmedPrompt({ ...draftPrompt, source: freshPrompt.source, stats: freshPrompt.stats });
+    setConfirmedInput(inputKey);
+    closePreview();
+  }
 
   function buildPov(): string {
     if (povMode === "limited" || povMode === "first") {
@@ -89,6 +139,10 @@ export default function ChapterWorkbench({
       setBanner({ kind: "err", msg: t("wb.needIdea") });
       return;
     }
+    if (promptStale) {
+      setBanner({ kind: "err", msg: t("pr.stale") });
+      return;
+    }
     setBusy("generate");
     setBanner({ kind: "info", msg: t("wb.generating") });
     try {
@@ -99,7 +153,9 @@ export default function ChapterWorkbench({
         useContext,
         overwrite,
         buildPov(),
-        narrative.trim()
+        narrative.trim(),
+        confirmedPrompt,
+        contextOptions
       );
       handleResult(res, t("wb.genOk", { id }));
       if (res.success) {
@@ -161,7 +217,7 @@ export default function ChapterWorkbench({
     const warn = includeMemory
       ? t("wb.resetConfirmMem", { id: currentChapter })
       : t("wb.resetConfirmNo", { id: currentChapter });
-    if (!window.confirm(warn)) return;
+    if (!window.confirm(`${warn}\n${catalog?.chapter_file ?? ""}`)) return;
     setBusy("reset");
     try {
       const res = await api.resetChapter(currentChapter, includeMemory);
@@ -239,6 +295,9 @@ export default function ChapterWorkbench({
           </div>
         </div>
 
+        <ContextControls chapterId={(currentChapter || newId).trim()} options={contextOptions}
+          onChange={setContextOptions} revision={promptRevision} catalog={catalog} setCatalog={setCatalog} disabled={running} />
+
         <details className="narrative">
           <summary>{t("wb.narrativeSection")}</summary>
           <div className="row">
@@ -268,7 +327,11 @@ export default function ChapterWorkbench({
           </Field>
         </details>
 
-        <div className="actions">
+        <div className="prompt-status muted">{t(confirmedPrompt ? "pr.manual" : "pr.auto")}</div>
+        {promptStale ? <Banner kind="info">{t("pr.stale")}</Banner> : null}
+        <div className="actions wrap">
+          <button onClick={onPreview} disabled={running}>{busy === "preview" ? <Spinner /> : null}{t("pr.preview")}</button>
+          {confirmedPrompt ? <button disabled={running} onClick={() => setConfirmedPrompt(undefined)}>{t("pr.resetAuto")}</button> : null}
           <button className="primary" onClick={onGenerate} disabled={running}>
             {busy === "generate" ? <Spinner /> : null} {t("wb.generate")}
           </button>
@@ -287,6 +350,7 @@ export default function ChapterWorkbench({
             </button>
           </div>
         </div>
+        {catalog ? <p className="muted source-path">{t("cx.source")}: {catalog.chapter_file}</p> : null}
         <textarea
           className="chapter-body"
           value={content}
@@ -321,6 +385,26 @@ export default function ChapterWorkbench({
 
       {banner ? <Banner kind={banner.kind}>{banner.msg}</Banner> : null}
       <LogBox log={log} />
+      <dialog ref={dialogRef} className="prompt-dialog" aria-labelledby="prompt-dialog-title"
+        onCancel={() => { setDraftPrompt(null); setFreshPrompt(null); }}>
+        {draftPrompt ? <>
+          <h2 id="prompt-dialog-title">{t("pr.preview")}</h2>
+          <p className="muted">{t("pr.previewHint")}</p>
+          {freshPrompt && (draftPrompt.source !== freshPrompt.source || promptStale) ?
+            <Banner kind="info">{t("pr.changed")}</Banner> : null}
+          <ContextReport preview={draftPrompt} />
+          <Field label={t("pr.system")}><textarea className="prompt-system" value={draftPrompt.prompts.system}
+            onChange={(e) => setDraftPrompt({ ...draftPrompt, prompts: { ...draftPrompt.prompts, system: e.target.value } })} /></Field>
+          <Field label={t("pr.user")}><textarea className="prompt-user" value={draftPrompt.prompts.user}
+            onChange={(e) => setDraftPrompt({ ...draftPrompt, prompts: { ...draftPrompt.prompts, user: e.target.value } })} /></Field>
+          <div className="actions wrap">
+            <button onClick={() => freshPrompt && setDraftPrompt(freshPrompt)}>{t("pr.rebuild")}</button>
+            <span className="spacer" />
+            <button onClick={closePreview}>{t("pr.cancel")}</button>
+            <button className="primary" disabled={!draftPrompt.prompts.system.trim() || !draftPrompt.prompts.user.trim() || estimateTokens(draftPrompt.prompts.system) + estimateTokens(draftPrompt.prompts.user) > draftPrompt.stats.budget} onClick={confirmPreview}>{t("pr.confirm")}</button>
+          </div>
+        </> : null}
+      </dialog>
     </div>
   );
 }

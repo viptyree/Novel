@@ -3,7 +3,7 @@ import { api, LlmProvider, Settings } from "../api";
 import { useT } from "../i18n";
 import { Banner, Field, Spinner } from "./common";
 
-export default function SettingsPanel({ root }: { root: string }) {
+export default function SettingsPanel({ root, onSaved }: { root: string; onSaved: () => Promise<void> }) {
   const t = useT();
   const [settings, setSettings] = useState<Settings>({
     project_dir: "",
@@ -13,11 +13,13 @@ export default function SettingsPanel({ root }: { root: string }) {
     disable_thinking: true,
     llm_provider: "api",
   });
+  const [sourceDirectory, setSourceDirectory] = useState("");
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<{ kind: "ok" | "err" | "info"; msg: string } | null>(null);
 
   useEffect(() => {
     api.getSettings().then(setSettings).catch(() => {});
+    api.getSourceSettings().then((s) => setSourceDirectory(s.directory)).catch((e) => setBanner({ kind: "err", msg: String(e) }));
   }, []);
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
@@ -28,6 +30,8 @@ export default function SettingsPanel({ root }: { root: string }) {
     setBusy(true);
     try {
       await api.saveSettings(settings);
+      if (sourceDirectory.trim()) await api.saveSourceSettings({ directory: sourceDirectory.trim() });
+      await onSaved();
       setBanner({ kind: "ok", msg: t("st.saved") });
     } catch (e) {
       setBanner({ kind: "err", msg: String(e) });
@@ -58,6 +62,10 @@ export default function SettingsPanel({ root }: { root: string }) {
             placeholder={t("st.projectDirPlaceholder")}
             onChange={(e) => update("project_dir", e.target.value)}
           />
+        </Field>
+
+        <Field label={t("cx.sourceDir")} hint={t("cx.sourceHint")}>
+          <input value={sourceDirectory} onChange={(e) => setSourceDirectory(e.target.value)} placeholder="正文 / chapters" />
         </Field>
 
         <Field label={t("st.provider")} hint={t("st.providerHint")}>

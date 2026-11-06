@@ -14,6 +14,10 @@ interface FileDef {
 
 const FILES: FileDef[] = [
   {
+    rel: "author-notes.md", label: { zh: "作者备注（不发送模型）", en: "Author notes (excluded)" }, group: "core",
+    note: { zh: "版本冲突、待确认事项和未来规划保存在这里，不自动加入提示词。", en: "Keep version conflicts, questions and plans here. These notes are not sent to the model." },
+  },
+  {
     rel: "memory/story_bible.yaml",
     label: { zh: "故事圣经", en: "Story Bible" },
     group: "core",
@@ -29,7 +33,7 @@ const FILES: FileDef[] = [
     rel: "outlines/book_outline.yaml",
     label: { zh: "全书大纲", en: "Book Outline" },
     group: "core",
-    note: { zh: "全书方向与章节规划", en: "Overall direction and chapter plan" },
+    note: { zh: "全书方向与章节规划；不会默认全文发送，可在工作台填写相关选段", en: "Book direction and plans. Only explicitly chosen excerpts enter generation context" },
   },
   {
     rel: "memory/foreshadowing.yaml",
@@ -47,7 +51,7 @@ const FILES: FileDef[] = [
     rel: "config.yaml",
     label: { zh: "流水线配置", en: "Pipeline Config" },
     group: "core",
-    note: { zh: "生成参数与默认风格规则", en: "Generation params and default style rules" },
+    note: { zh: "程序读取的配置，不直接进入提示词；已有设置可用时可以留空", en: "Program configuration, not model input. May remain empty when app settings suffice" },
   },
   {
     rel: "memory/chapter_summaries.jsonl",

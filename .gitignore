@@ -94,3 +94,12 @@ test_*.py
 # 内部开发/交接文档（绝不上传）
 piple重建.md
 *重建.md
+
+# Per-project writing state and private author notes
+.prompt-settings.json
+.chapter-source.json
+.memory-snapshots/
+.chapter-backups/
+.memory-backups/
+author-notes.md
+memory/state_metadata.json

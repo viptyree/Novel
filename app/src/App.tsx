@@ -6,15 +6,17 @@ import ChapterWorkbench from "./components/ChapterWorkbench";
 import Reports from "./components/Reports";
 import MemoryEditor from "./components/MemoryEditor";
 import SettingsPanel from "./components/SettingsPanel";
+import PromptSettingsPanel from "./components/PromptSettingsPanel";
 import Guide from "./components/Guide";
 import "./App.css";
 
-type Tab = "workbench" | "reports" | "memory" | "settings" | "guide";
+type Tab = "workbench" | "reports" | "memory" | "settings" | "prompts" | "guide";
 
 const NAV: { key: Tab; labelKey: string; icon: string }[] = [
   { key: "workbench", labelKey: "nav.workbench", icon: "✍️" },
   { key: "reports", labelKey: "nav.reports", icon: "📋" },
   { key: "memory", labelKey: "nav.memory", icon: "🧠" },
+  { key: "prompts", labelKey: "nav.prompts", icon: "📝" },
   { key: "settings", labelKey: "nav.settings", icon: "⚙️" },
   { key: "guide", labelKey: "nav.guide", icon: "📖" },
 ];
@@ -40,8 +42,10 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("workbench");
   const [chapters, setChapters] = useState<string[]>([]);
   const [currentChapter, setCurrentChapter] = useState("");
+  const [sourceKey, setSourceKey] = useState("");
   const [root, setRoot] = useState("");
   const [error, setError] = useState("");
+  const [promptRevision, setPromptRevision] = useState(0);
 
   const refreshChapters = useCallback(async () => {
     try {
@@ -54,6 +58,7 @@ export default function App() {
   useEffect(() => {
     api.getPipelineRoot().then(setRoot).catch((e) => setError(String(e)));
     refreshChapters();
+    api.getSourceSettings().then((s) => setSourceKey(s.directory)).catch((e) => setError(String(e)));
   }, [refreshChapters]);
 
   const currentLabel = NAV.find((n) => n.key === tab)?.labelKey ?? "";
@@ -130,14 +135,16 @@ export default function App() {
         <div className="page">
           {error ? <div className="banner banner-err">{error}</div> : null}
 
-          {tab === "workbench" && (
+          <div hidden={tab !== "workbench"}>
             <ChapterWorkbench
+              key={`${root}:${sourceKey}`}
+              promptRevision={promptRevision}
               chapters={chapters}
               currentChapter={currentChapter}
               setCurrentChapter={setCurrentChapter}
               refreshChapters={refreshChapters}
             />
-          )}
+          </div>
           {tab === "reports" && (
             <Reports
               chapters={chapters}
@@ -146,7 +153,14 @@ export default function App() {
             />
           )}
           {tab === "memory" && <MemoryEditor />}
-          {tab === "settings" && <SettingsPanel root={root} />}
+          <div hidden={tab !== "prompts"}><PromptSettingsPanel key={root} onSaved={() => setPromptRevision((n) => n + 1)} /></div>
+          {tab === "settings" && <SettingsPanel root={root} onSaved={async () => {
+            setPromptRevision((n) => n + 1);
+            const nextRoot = await api.getPipelineRoot();
+            const source = await api.getSourceSettings();
+            if (nextRoot !== root || source.directory !== sourceKey) { setRoot(nextRoot); setSourceKey(source.directory); setCurrentChapter(""); }
+            await refreshChapters();
+          }} />}
           {tab === "guide" && <Guide />}
         </div>
       </main>

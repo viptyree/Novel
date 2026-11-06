@@ -808,3 +808,35 @@ textarea::-webkit-scrollbar-thumb {
   background: var(--border-strong);
   border-radius: 999px;
 }
+
+/* Prompt configuration and native modal, shared by all themes. */
+[hidden] { display: none !important; }
+textarea.prompt-system { min-height: 110px; line-height: 1.6; }
+textarea.prompt-user { min-height: 350px; line-height: 1.7; }
+.prompt-status { margin-top: 12px; }
+.prompt-dialog {
+  width: min(900px, calc(100vw - 48px));
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel-solid);
+  color: var(--text);
+  padding: 24px;
+}
+.prompt-dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
+.prompt-dialog .field { margin-top: 16px; }
+.prompt-dialog textarea.prompt-user { min-height: 300px; }
+
+.context-controls { margin-top: 18px; border-top: 1px solid var(--border-strong); padding-top: 14px; }
+.context-controls summary, .context-report summary { cursor: pointer; padding: 6px 0; }
+.context-controls input[type="checkbox"] { width: auto; flex-shrink: 0; }
+.context-columns { display: grid; gap: 12px; margin: 12px 0; }
+.context-choices, .context-source-list { max-height: 280px; overflow: auto; }
+.context-choice { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0; }
+.context-choice:has(input:disabled) { opacity: .6; }
+.context-choice span { min-width: 0; overflow-wrap: anywhere; }
+.context-source { padding: 8px 0; border-bottom: 1px solid var(--border-strong); overflow-wrap: anywhere; }
+.source-path { overflow-wrap: anywhere; font-size: 12px; }
+.author-notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; font-family: inherit; }
+.context-report { margin: 14px 0; }

@@ -17,6 +17,26 @@ export interface Settings {
   llm_provider?: LlmProvider;
 }
 
+export interface TaskPrompt { system: string; user_template: string; }
+export interface PromptSettings extends TaskPrompt { consistency: TaskPrompt; memory: TaskPrompt; }
+export interface PromptPair { system: string; user: string; }
+export interface ContextOptions {
+  automatic: boolean; characters: string[]; chapters: string[]; events: string[];
+  recent_chapters: number; max_events: number; input_budget: number;
+  include_outline: boolean; outline_excerpt: string;
+}
+export const defaultContextOptions: ContextOptions = {
+  automatic: true, characters: [], chapters: [], events: [], recent_chapters: 2,
+  max_events: 6, input_budget: 8000, include_outline: false, outline_excerpt: "",
+};
+export interface ContextSource { kind: string; id: string; file: string; reason: string; included: boolean; characters: number; }
+export interface ContextStats { characters: number; estimated_tokens: number; budget: number; over_budget: boolean; sources: ContextSource[]; warnings: string[]; }
+export interface PromptPreview { prompts: PromptPair; source: string; stats: ContextStats; }
+export interface ContextCandidate { id: string; label: string; chapter: number | null; }
+export interface ContextCatalog { characters: ContextCandidate[]; chapters: ContextCandidate[]; events: ContextCandidate[]; source_directory: string; chapter_file: string; notes: string; }
+export interface SourceSettings { directory: string; }
+
+
 export type ReportKind = "generation" | "consistency" | "memory";
 
 export const api = {
@@ -42,6 +62,15 @@ export const api = {
   saveSettings: (settings: Settings) =>
     invoke<void>("save_settings", { settings }),
 
+  contextCatalog: (chapterId: string) => invoke<ContextCatalog>("context_catalog", { chapterId }),
+  getSourceSettings: () => invoke<SourceSettings>("get_source_settings"),
+  saveSourceSettings: (settings: SourceSettings) => invoke<void>("save_source_settings", { settings }),
+  getPromptSettings: () => invoke<PromptSettings>("get_prompt_settings"),
+  defaultPromptSettings: () => invoke<PromptSettings>("default_prompt_settings"),
+  savePromptSettings: (settings: PromptSettings) => invoke<void>("save_prompt_settings", { settings }),
+  previewPrompt: (chapterId: string, idea: string, targetWords: number, useContext: boolean, pov: string, narrative: string, contextOptions: ContextOptions) =>
+    invoke<PromptPreview>("preview_generation_prompt", { chapterId, idea, targetWords, useContext, pov, narrative, contextOptions }),
+
   generateChapter: (
     chapterId: string,
     idea: string,
@@ -49,7 +78,9 @@ export const api = {
     useContext: boolean,
     overwrite: boolean,
     pov: string,
-    narrative: string
+    narrative: string,
+    promptOverride: PromptPreview | undefined,
+    contextOptions: ContextOptions
   ) =>
     invoke<CommandResult>("generate_chapter", {
       chapterId,
@@ -59,6 +90,8 @@ export const api = {
       overwrite,
       pov,
       narrative,
+      promptOverride: promptOverride ?? null,
+      contextOptions,
     }),
 
   checkConsistency: (chapterId: string) =>
