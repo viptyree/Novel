@@ -88,20 +88,28 @@ pub fn chapters(root: &Path) -> Result<BTreeMap<u32, PathBuf>, String> {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        let n = if path.is_dir() && path.join("chapter.md").is_file() {
-            number(&name)
-        } else if path.extension().and_then(|s| s.to_str()) == Some("md") {
+        if path.is_dir() {
+            if let Some(n) = number(&name) {
+                for child in fs::read_dir(&path).map_err(|e| e.to_string())? {
+                    let file = child.map_err(|e| e.to_string())?.path();
+                    let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if file.is_file() && file.extension().and_then(|s| s.to_str()) == Some("md")
+                        && (stem == "chapter" || number(stem) == Some(n)) {
+                        if result.insert(n, file).is_some() {
+                            return Err(format!("正文目录第 {} 章存在多个版本，请先明确保留哪个文件", n));
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+        let n = if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some("md") {
             number(path.file_stem().and_then(|s| s.to_str()).unwrap_or(""))
         } else {
             None
         };
         if let Some(n) = n {
-            let file = if path.is_dir() {
-                path.join("chapter.md")
-            } else {
-                path
-            };
-            if result.insert(n, file).is_some() {
+            if result.insert(n, path).is_some() {
                 return Err(format!(
                     "正文目录第 {} 章存在多个版本，请先明确保留哪个文件",
                     n

@@ -22,6 +22,16 @@ Every chapter goes around this loop. The characters, events and foreshadowing yo
 
 ## 🍱 Before you start: feed the Memory
 
+Click the current project name at the top to open **Recent projects**:
+
+- **New project**: enter an optional name and an absolute path to a new or empty folder.
+- **Open existing project**: enter an existing novel project path. Existing files are kept; only missing templates are added.
+- Projects show their last opened time and can be pinned. **Remove from list** keeps all files on disk.
+- If a folder moves, use **Locate folder** on the missing project record.
+- Save edits before switching. Unsaved work prompts for confirmation; running operations block switching.
+
+Upgrading registers the current project automatically. Open older projects once to add them to the list.
+
 The Memory is this book's "setting bible + ledger". Before writing each chapter, the model reads through it. The more care you put in, the more it reads like *your* book instead of generic web-fiction.
 
 Edit it under the **🧠 Memory** tab. For a new book, fill at least the first three (Story Bible, Characters, Book Outline); the rest can grow as you write.
@@ -140,6 +150,14 @@ Click it and the model writes the whole chapter. The button spins — **be patie
 ### Chapter text (editable) + Save text
 The generated text sits in the box and **you can edit it freely** (fix typos, tweak sentences, cut paragraphs). Click **Save text** when done. Not happy overall? Regenerate from above.
 
+### Generate titles + Save title and rename
+
+Above the body editor, click **Generate titles** to get three suggestions based on the current editor text. Select a suggestion, edit it, or request **More suggestions**. If the body changes, a notice marks the suggestions as based on an earlier version.
+
+Click **Save title and rename** to rename `第12章.md` to `第12章 Title.md`. A legacy `chapters/ch012/chapter.md` is renamed in the same folder. The original is backed up first; existing files are never overwritten. Chapter IDs, reports, and memory references remain stable.
+
+Saving a title changes the filename only. Save body edits separately with **Save text**. Title generation uses your selected model route; entering a title manually requires no model call.
+
 ### Consistency check
 Makes the model play editor: it checks this chapter against the character files, world rules, foreshadowing and timeline, and flags issues (info shown too early, setting drift, repeated events, AI-ish phrasing…). Results go into the Consistency report under **📋 Reports**.
 > It only gives **suggestions** — it never edits your text. Acting on them is up to you.
@@ -218,7 +236,7 @@ A: The model didn't return valid JSON this time. Retrying usually fixes it; if i
 A: Raise `max_output_tokens` in **Settings / `config.yaml`** (set `0` for unlimited), or split a long chapter into two generations.
 
 **Q: Where is my manuscript stored?**
-A: Under the **project directory** (full path shown at the bottom of Settings): `chapters/` for text, `memory/` for memory, `outputs/reports/` for reports. Change the **project directory** in Settings to move it.
+A: Text defaults to `chapters/` under the **project directory**, or the chapter source folder configured in Settings. Memory is in `memory/` and reports in `outputs/reports/`. Settings shows the full project path; switch books using **Recent projects** at the top. To move a project, finish operations and save edits, move the complete folder, then locate its new path in the project list.
 
 ---
 

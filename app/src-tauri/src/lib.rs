@@ -4,6 +4,8 @@
 mod llm;
 mod context;
 mod project_source;
+mod project_manager;
+mod chapter_titles;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -128,66 +130,54 @@ fn resolve_project_dir(app: &tauri::AppHandle) -> PathBuf {
         PathBuf::from(&settings.project_dir)
     };
 
-    // 确保目录存在
-    let _ = fs::create_dir_all(&dir);
     dir
 }
 
-fn ensure_project_initialized(project_dir: &Path, app: &tauri::AppHandle) {
+fn ensure_project_initialized(project_dir: &Path, _app: &tauri::AppHandle) -> Result<(), String> {
+    if !project_dir.is_dir() {
+        return Err("项目目录不存在，请在最近项目中重新定位或新建项目".into());
+    }
+    static INITIALIZATION: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _initialization = INITIALIZATION.lock().map_err(|e| e.to_string())?;
     let marker = project_dir.join(".initialized");
     if marker.exists() {
-        return;
+        return Ok(());
     }
 
-    // 查找 templates 资源目录
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let tpl = resource_dir.join("templates");
-        if tpl.exists() {
-            // 复制 memory 模板
-            let tpl_memory = tpl.join("memory");
-            let dst_memory = project_dir.join("memory");
-            if tpl_memory.exists() {
-                let _ = fs::create_dir_all(&dst_memory);
-                copy_dir_contents(&tpl_memory, &dst_memory);
+    // Embed templates so dev and packaged builds initialize identically.
+    // create_new preserves all author files, including imported projects without a marker.
+    use std::io::Write;
+    let templates = [
+        ("config.yaml", include_str!("../templates/config.yaml")),
+        ("memory/characters.yaml", include_str!("../templates/memory/characters.yaml")),
+        ("memory/story_bible.yaml", include_str!("../templates/memory/story_bible.yaml")),
+        ("memory/foreshadowing.yaml", include_str!("../templates/memory/foreshadowing.yaml")),
+        ("memory/relationships.json", include_str!("../templates/memory/relationships.json")),
+        ("memory/chapter_summaries.jsonl", include_str!("../templates/memory/chapter_summaries.jsonl")),
+        ("memory/events.jsonl", include_str!("../templates/memory/events.jsonl")),
+        ("memory/timeline.jsonl", include_str!("../templates/memory/timeline.jsonl")),
+        ("memory/style_bank.jsonl", include_str!("../templates/memory/style_bank.jsonl")),
+        ("outlines/book_outline.yaml", include_str!("../templates/outlines/book_outline.yaml")),
+    ];
+    for (rel, contents) in templates {
+        let path = project_dir.join(rel);
+        if let Some(parent) = path.parent() { fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+        match fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(contents.as_bytes()) {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(e.to_string());
+                }
             }
-            // 复制 outlines 模板
-            let tpl_outlines = tpl.join("outlines");
-            let dst_outlines = project_dir.join("outlines");
-            if tpl_outlines.exists() {
-                let _ = fs::create_dir_all(&dst_outlines);
-                copy_dir_contents(&tpl_outlines, &dst_outlines);
-            }
-            // 复制 config.yaml
-            let tpl_config = tpl.join("config.yaml");
-            if tpl_config.exists() {
-                let _ = fs::copy(&tpl_config, project_dir.join("config.yaml"));
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && path.is_file() => {},
+            Err(e) => return Err(format!("初始化 {} 失败：{}", path.display(), e)),
         }
     }
 
-    // 确保必要子目录存在
-    let _ = fs::create_dir_all(project_dir.join("chapters"));
-    let _ = fs::create_dir_all(project_dir.join("outputs").join("reports"));
-    // 写初始化标记
-    let _ = fs::write(marker, "initialized");
-}
-
-fn copy_dir_contents(src: &Path, dst: &Path) {
-    let entries = match fs::read_dir(src) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let src_path = entry.path();
-        let file_name = entry.file_name();
-        let dst_path = dst.join(&file_name);
-        if src_path.is_dir() {
-            let _ = fs::create_dir_all(&dst_path);
-            copy_dir_contents(&src_path, &dst_path);
-        } else {
-            let _ = fs::copy(&src_path, &dst_path);
-        }
-    }
+    fs::create_dir_all(project_dir.join("chapters")).map_err(|e| e.to_string())?;
+    fs::create_dir_all(project_dir.join("outputs/reports")).map_err(|e| e.to_string())?;
+    fs::write(marker, "initialized").map_err(|e| e.to_string())
 }
 
 // ============================================================
@@ -213,7 +203,10 @@ fn config_string(config: &serde_yaml::Value, key: &str, default: &str) -> String
 /// 构建运行时配置
 fn build_run_config(app: &tauri::AppHandle) -> Result<RunConfig, String> {
     let project_dir = resolve_project_dir(app);
-    ensure_project_initialized(&project_dir, app);
+    if load_settings(app).project_dir.trim().is_empty() {
+        fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
+    }
+    ensure_project_initialized(&project_dir, app)?;
     let settings = load_settings(app);
     let config = load_config_yaml(&project_dir);
 
@@ -708,16 +701,19 @@ fn choose_generation_prompt(preview: PromptPreview, custom: Option<PromptOverrid
 
 #[tauri::command]
 fn context_catalog(app: tauri::AppHandle, chapter_id: String) -> Result<context::Catalog, String> {
+    let _access = project_manager::read_access()?;
     context::catalog(&resolve_project_dir(&app), &chapter_id)
 }
 
 #[tauri::command]
 fn get_source_settings(app: tauri::AppHandle) -> Result<project_source::SourceSettings, String> {
+    let _access = project_manager::read_access()?;
     project_source::load(&resolve_project_dir(&app))
 }
 
 #[tauri::command]
 fn save_source_settings(app: tauri::AppHandle, settings: project_source::SourceSettings) -> Result<(), String> {
+    let _access = project_manager::read_access()?;
     if settings.directory.trim().is_empty() { return Err("正文目录不能为空".into()); }
     let root = resolve_project_dir(&app);
     let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
@@ -726,6 +722,7 @@ fn save_source_settings(app: tauri::AppHandle, settings: project_source::SourceS
 
 #[tauri::command]
 fn get_prompt_settings(app: tauri::AppHandle) -> Result<PromptSettings, String> {
+    let _access = project_manager::read_access()?;
     load_prompt_settings(&resolve_project_dir(&app))
 }
 
@@ -734,6 +731,7 @@ fn default_prompt_settings() -> PromptSettings { PromptSettings::default() }
 
 #[tauri::command]
 fn save_prompt_settings(app: tauri::AppHandle, settings: PromptSettings) -> Result<(), String> {
+    let _access = project_manager::read_access()?;
     validate_prompt_settings(&settings)?;
     let path = resolve_project_dir(&app).join(".prompt-settings.json");
     let temp = path.with_extension("json.tmp");
@@ -745,8 +743,9 @@ fn save_prompt_settings(app: tauri::AppHandle, settings: PromptSettings) -> Resu
 fn preview_generation_prompt(app: tauri::AppHandle, chapter_id: String, idea: String,
     target_words: u32, use_context: bool, pov: String, narrative: String, context_options: Option<context::Options>,
 ) -> Result<PromptPreview, String> {
+    let _access = project_manager::read_access()?;
     let project_dir = resolve_project_dir(&app);
-    ensure_project_initialized(&project_dir, &app);
+    ensure_project_initialized(&project_dir, &app)?;
     let settings = load_settings(&app);
     prepare_generation(&project_dir, &settings, &chapter_id, &idea, target_words, use_context,
         &pov, &narrative, &context_options.unwrap_or_default()).map(|(preview, _)| preview)
@@ -1316,7 +1315,7 @@ const EXTRACTION_PROMPT_TEMPLATE: &str = r#"你是一位专业的小说编辑助
       "description": "事件描述",
       "location": "地点",
       "time_order": "相对时间描述",
-      "importance": 1到10的整数
+      "importance": 5
     }
   ],
   "character_updates": [
@@ -1377,6 +1376,61 @@ fn validate_memory_extraction(data: &serde_json::Value, chapter_id: &str) -> Res
         }
     }
     Ok(())
+}
+
+// 抽取偶尔会返回合法但全空的模板；反馈校验错误后最多重试一次。
+// 两次结果都必须通过同一校验，调用者只会收到可以写入的结果。
+fn extract_memory_with_retry<F>(
+    mut messages: Vec<llm::ChatMessage>,
+    chapter_id: &str,
+    log: &mut String,
+    mut complete: F,
+) -> Result<(serde_json::Value, String), String>
+where
+    F: FnMut(Vec<llm::ChatMessage>) -> Result<String, String>,
+{
+    messages.insert(0, llm::ChatMessage {
+        role: "system".into(),
+        content: format!(
+            "请根据本次提供的章节正文抽取真实内容，不要返回空白模板。只输出一个 JSON 对象。\
+chapter_id 必须为 {chapter_id}；chapter_summary 必须是非空字符串，用2-3句话概括本章实际发生的事情。\
+events、character_updates、foreshadowing_updates、relationship_updates、continuity_risks 必须为数组；\
+没有相应变化的数组可以为空，但章节摘要不能留空。events 中每项必须有非空 description，\
+如含 chapter_id 必须与本章一致。importance 使用1到10的整数。不要编造正文中未发生的内容。"
+        ),
+    });
+    let mut diagnostics = String::new();
+    for attempt in 1..=2 {
+        // 保留原始正文和资料，每次都发送完整上下文。
+        let request = messages.iter().map(|m| llm::ChatMessage {
+            role: m.role.clone(), content: m.content.clone(),
+        }).collect();
+        let raw = complete(request).map_err(|e| {
+            log.push_str(&format!("[错误] 模型调用失败: {}\n", e));
+            format!("{}\n模型调用失败: {}", diagnostics, e)
+        })?;
+        let result = parse_extraction_json(&raw).and_then(|data| {
+            validate_memory_extraction(&data, chapter_id)?;
+            Ok(data)
+        });
+        match result {
+            Ok(data) => return Ok((data, raw)),
+            Err(error) => {
+                diagnostics.push_str(&format!("## 第 {} 次抽取\n\n{}\n\n原始输出：\n{}\n\n", attempt, error, raw));
+                if attempt == 2 {
+                    log.push_str(&format!("[错误] 重试结果仍未通过校验：{}\n", error));
+                    return Err(diagnostics);
+                }
+                log.push_str(&format!("[警告] 首次记忆抽取未通过校验：{}\n[信息] 正在自动重试记忆抽取（1/1）...\n", error));
+                messages.push(llm::ChatMessage { role: "assistant".into(), content: raw });
+                messages.push(llm::ChatMessage {
+                    role: "user".into(),
+                    content: format!("上次输出校验失败：{}。请重新阅读上方完整章节正文，重新输出完整 JSON 对象，补全缺失字段并修正类型。尤其 chapter_summary 必须根据正文填写实际摘要，不能是空字符串。不要只返回修正的字段。", error),
+                });
+            }
+        }
+    }
+    unreachable!()
 }
 
 /// 从模型输出中提取 JSON（移植 Python 的 parse_extraction_json）
@@ -2167,8 +2221,8 @@ fn do_update_memory(app: &tauri::AppHandle, chapter_id: &str) -> CommandResult {
 
     let mut log = String::new();
     log.push_str(&format!(
-        "[信息] 正在读取 {}/chapter.md...\n",
-        chapter_id
+        "[信息] 正在读取 {}...\n",
+        chapter_path.display()
     ));
     log.push_str(&format!(
         "[信息] 章节文本长度: {} 字符\n",
@@ -2201,47 +2255,34 @@ fn do_update_memory(app: &tauri::AppHandle, chapter_id: &str) -> CommandResult {
 
     log.push_str("[信息] 正在调用模型进行记忆抽取...\n");
 
-    // 记忆抽取必须吐出完整 JSON，绝不能被输出上限截断：
-    // 这里不发送 max_tokens，让模型写到自然结束（仅受上下文窗口约束）。
-    let raw_output = match run_completion(&config, &settings, messages, 0.3, top_p, None) {
-        Ok(r) => r,
-        Err(e) => {
-            return CommandResult {
-                success: false,
-                log: format!("{}[错误] 模型调用失败: {}", log, e),
-            };
-        }
-    };
-
-    let data = match parse_extraction_json(&raw_output) {
-        Ok(d) => d,
+    // 不额外设置输出上限；即使 JSON 可解析，也必须通过结构校验才能写入。
+    let (data, raw_output) = match extract_memory_with_retry(messages, chapter_id, &mut log, |request| {
+        run_completion(&config, &settings, request, 0.3, top_p, None)
+    }) {
+        Ok(result) => result,
         Err(e) => {
             let fail_path = config
                 .project_dir
                 .join("outputs")
                 .join("reports")
-                .join(format!("{}_memory_parse_failed.md", chapter_id));
-            write_text(
-                &fail_path,
-                &format!("# 记忆抽取 JSON 解析失败\n\n{}", raw_output),
-            );
+                .join(format!("{}_memory_extraction_failed.md", chapter_id));
+            let saved = fs::create_dir_all(fail_path.parent().unwrap())
+                .and_then(|_| fs::write(&fail_path, format!("# 记忆抽取失败\n\n{}", e)));
+            let report_log = match saved {
+                Ok(()) => format!("[信息] 失败详情及原始输出已保存到: {}", fail_path.display()),
+                Err(err) => format!("[警告] 无法保存失败报告 {}: {}\n{}", fail_path.display(), err, e),
+            };
             return CommandResult {
                 success: false,
                 log: format!(
-                    "{}[错误] {}\n[信息] 原始输出已保存到: {}",
+                    "{}[错误] 记忆抽取失败，未写入记忆。\n{}",
                     log,
-                    e,
-                    fail_path.display()
+                    report_log
                 ),
             };
         }
     };
 
-    if let Err(e) = validate_memory_extraction(&data, chapter_id) {
-        let fail_path = config.project_dir.join("outputs").join("reports").join(format!("{}_memory_schema_failed.md", chapter_id));
-        write_text(&fail_path, &format!("{}\n\n{}", e, raw_output));
-        return CommandResult { success: false, log: format!("{}[错误] {}", log, e) };
-    }
     log.push_str("[成功] JSON 解析及结构校验成功\n");
     log.push_str("[信息] 正在应用记忆更新...\n");
 
@@ -2385,18 +2426,21 @@ fn do_reset_chapter(
 
 #[tauri::command]
 fn get_pipeline_root(app: tauri::AppHandle) -> Result<String, String> {
+    let _access = project_manager::read_access()?;
     let config = build_run_config(&app)?;
     Ok(config.project_dir.to_string_lossy().to_string())
 }
 
 #[tauri::command]
 fn list_chapters(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let _access = project_manager::read_access()?;
     let config = build_run_config(&app)?;
     Ok(project_source::chapters(&config.project_dir)?.keys().map(|n| format!("ch{:03}", n)).collect())
 }
 
 #[tauri::command]
 fn read_chapter(app: tauri::AppHandle, chapter_id: String) -> Result<String, String> {
+    let _access = project_manager::read_access()?;
     let config = build_run_config(&app)?;
     let path = project_source::chapter_path(&config.project_dir, &chapter_id)?;
     Ok(read_text(&path))
@@ -2404,6 +2448,7 @@ fn read_chapter(app: tauri::AppHandle, chapter_id: String) -> Result<String, Str
 
 #[tauri::command]
 fn save_chapter(app: tauri::AppHandle, chapter_id: String, content: String) -> Result<(), String> {
+    let _access = project_manager::read_access()?;
     let config = build_run_config(&app)?;
     let path = project_source::chapter_path(&config.project_dir, &chapter_id)?;
     project_source::write(&config.project_dir, &path, &content)
@@ -2415,6 +2460,7 @@ fn read_report(
     chapter_id: String,
     kind: String,
 ) -> Result<String, String> {
+    let _access = project_manager::read_access()?;
     let config = build_run_config(&app)?;
     let filename = match kind.as_str() {
         "generation" => format!("{}_chapter_generation_report.md", chapter_id),
@@ -2432,6 +2478,7 @@ fn read_report(
 
 #[tauri::command]
 fn read_memory_file(app: tauri::AppHandle, rel: String) -> Result<String, String> {
+    let _access = project_manager::read_access()?;
     let rel = normalize_rel(&rel);
     if !EDITABLE_FILES.contains(&rel.as_str()) {
         return Err(format!("不允许读取该文件: {}", rel));
@@ -2446,6 +2493,7 @@ fn save_memory_file(
     rel: String,
     content: String,
 ) -> Result<(), String> {
+    let _access = project_manager::read_access()?;
     let rel = normalize_rel(&rel);
     if !EDITABLE_FILES.contains(&rel.as_str()) {
         return Err(format!("不允许写入该文件: {}", rel));
@@ -2460,6 +2508,7 @@ fn save_memory_file(
 
 #[tauri::command]
 fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
+    let _access = project_manager::read_access()?;
     let config = build_run_config(&app)?;
     let mut settings = load_settings(&app);
     // 确保 project_dir 回填（展示当前实际使用的目录）
@@ -2471,14 +2520,12 @@ fn get_settings(app: tauri::AppHandle) -> Result<Settings, String> {
 
 #[tauri::command]
 fn save_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), String> {
-    // 确保项目目录与首次初始化就绪（不依赖其返回值）
-    build_run_config(&app)?;
-    let path = settings_path(&app);
-    if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+    let _access = project_manager::read_access()?;
+    let active = resolve_project_dir(&app);
+    if !project_manager::same_path(Path::new(&settings.project_dir), &active) {
+        return Err("项目目录已变更，请通过最近项目入口切换项目并重新加载设置".into());
     }
-    let text = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
-    fs::write(path, text).map_err(|e| e.to_string())
+    project_manager::atomic_json(&settings_path(&app), &settings)
 }
 
 #[tauri::command]
@@ -2496,7 +2543,15 @@ async fn generate_chapter(
 ) -> Result<CommandResult, String> {
     let pov = pov.unwrap_or_default();
     let narrative = narrative.unwrap_or_default();
+    let submitted_root = resolve_project_dir(&app);
     tauri::async_runtime::spawn_blocking(move || {
+        let _access = match project_manager::read_access() {
+            Ok(access) => access,
+            Err(log) => return CommandResult { success: false, log },
+        };
+        if !project_manager::same_path(&submitted_root, &resolve_project_dir(&app)) {
+            return CommandResult { success: false, log: "项目已切换，请在目标项目重新提交操作".into() };
+        }
         do_generate_chapter(
             &app,
             &chapter_id,
@@ -2519,7 +2574,15 @@ async fn check_consistency(
     app: tauri::AppHandle,
     chapter_id: String,
 ) -> Result<CommandResult, String> {
+    let submitted_root = resolve_project_dir(&app);
     tauri::async_runtime::spawn_blocking(move || {
+        let _access = match project_manager::read_access() {
+            Ok(access) => access,
+            Err(log) => return CommandResult { success: false, log },
+        };
+        if !project_manager::same_path(&submitted_root, &resolve_project_dir(&app)) {
+            return CommandResult { success: false, log: "项目已切换，请在目标项目重新提交操作".into() };
+        }
         do_check_consistency(&app, &chapter_id)
     })
     .await
@@ -2531,7 +2594,15 @@ async fn update_memory(
     app: tauri::AppHandle,
     chapter_id: String,
 ) -> Result<CommandResult, String> {
+    let submitted_root = resolve_project_dir(&app);
     tauri::async_runtime::spawn_blocking(move || {
+        let _access = match project_manager::read_access() {
+            Ok(access) => access,
+            Err(log) => return CommandResult { success: false, log },
+        };
+        if !project_manager::same_path(&submitted_root, &resolve_project_dir(&app)) {
+            return CommandResult { success: false, log: "项目已切换，请在目标项目重新提交操作".into() };
+        }
         do_update_memory(&app, &chapter_id)
     })
     .await
@@ -2544,7 +2615,15 @@ async fn reset_chapter(
     chapter_id: String,
     include_memory: bool,
 ) -> Result<CommandResult, String> {
+    let submitted_root = resolve_project_dir(&app);
     tauri::async_runtime::spawn_blocking(move || {
+        let _access = match project_manager::read_access() {
+            Ok(access) => access,
+            Err(log) => return CommandResult { success: false, log },
+        };
+        if !project_manager::same_path(&submitted_root, &resolve_project_dir(&app)) {
+            return CommandResult { success: false, log: "项目已切换，请在目标项目重新提交操作".into() };
+        }
         do_reset_chapter(&app, &chapter_id, include_memory)
     })
     .await
@@ -2568,6 +2647,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            // Keep the project picker available even when a previous directory
+            // or the registry is unavailable; its UI reports the concrete error.
+            if let Err(error) = project_manager::remember_startup(app.handle()) {
+                eprintln!("Project startup: {error}");
+            }
             // 运行时显式设置窗口/任务栏图标，确保 dev 与正式版都显示新 logo
             // include_image! 在编译期嵌入；图标文件变化会强制重新编译。
             if let Some(win) = app.get_webview_window("main") {
@@ -2576,6 +2660,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            project_manager::list_projects,
+            project_manager::open_project,
+            project_manager::update_project_entry,
+            chapter_titles::list_chapter_details,
+            chapter_titles::generate_chapter_titles,
+            chapter_titles::save_chapter_title,
             get_pipeline_root,
             list_chapters,
             read_chapter,
@@ -2694,6 +2784,66 @@ mod tests {
         assert!(validate_memory_extraction(&data, "ch006").is_err());
         data["events"] = json!("错误类型");
         assert!(validate_memory_extraction(&data, "ch005").is_err());
+    }
+
+    #[test]
+    fn memory_extraction_retries_invalid_outputs_with_original_context() {
+        let valid = json!({"chapter_id":"ch005", "chapter_summary":"主角查明真相。", "events":[],
+            "character_updates":[], "foreshadowing_updates":[], "relationship_updates":[], "continuity_risks":[]});
+        let mut empty = valid.clone();
+        empty["chapter_summary"] = json!("");
+        let mut wrong_chapter = valid.clone();
+        wrong_chapter["chapter_id"] = json!("ch004");
+        let mut wrong_type = valid.clone();
+        wrong_type["events"] = json!({});
+        for invalid in [empty.to_string(), wrong_chapter.to_string(), wrong_type.to_string(), "不是 JSON".into()] {
+            let mut calls = 0;
+            let mut log = String::new();
+            let result = extract_memory_with_retry(sys_user_messages("抽取记忆", "完整章节正文与人物资料"), "ch005", &mut log, |request| {
+                calls += 1;
+                assert!(request.iter().any(|m| m.content == "完整章节正文与人物资料"));
+                assert!(request[0].content.contains("chapter_summary 必须是非空字符串"));
+                if calls == 1 { return Ok(invalid.clone()); }
+                assert_eq!(request[request.len() - 2].content, invalid);
+                assert!(request.last().unwrap().content.contains("上次输出校验失败"));
+                Ok(valid.to_string())
+            }).unwrap();
+            assert_eq!(calls, 2);
+            assert_eq!(result.0, valid);
+            assert!(log.contains("自动重试"));
+        }
+    }
+
+    #[test]
+    fn memory_extraction_accepts_valid_first_response_and_bounds_failures() {
+        let raw = json!({"chapter_id":"ch005", "chapter_summary":"主角查明真相。", "events":[],
+            "character_updates":[], "foreshadowing_updates":[], "relationship_updates":[], "continuity_risks":[]}).to_string();
+        let mut calls = 0;
+        let mut log = String::new();
+        extract_memory_with_retry(vec![], "ch005", &mut log, |_| {
+            calls += 1;
+            Ok(raw.clone())
+        }).unwrap();
+        assert_eq!(calls, 1);
+        assert!(log.is_empty());
+
+        calls = 0;
+        let failure = extract_memory_with_retry(vec![], "ch005", &mut log, |_| {
+            calls += 1;
+            Ok("{\"chapter_id\":\"ch005\",\"chapter_summary\":\"\"}".into())
+        }).unwrap_err();
+        assert_eq!(calls, 2);
+        assert!(failure.contains("第 1 次抽取"));
+        assert!(failure.contains("第 2 次抽取"));
+        assert!(failure.contains("chapter_summary"));
+
+        calls = 0;
+        let failure = extract_memory_with_retry(vec![], "ch005", &mut log, |_| {
+            calls += 1;
+            Err("连接失败".into())
+        }).unwrap_err();
+        assert_eq!(calls, 1);
+        assert!(failure.contains("连接失败"));
     }
 
     #[test]

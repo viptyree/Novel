@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, LlmProvider, Settings } from "../api";
 import { useT } from "../i18n";
 import { Banner, Field, Spinner } from "./common";
+import { useProjectActivities, useProjectActivity } from "../projectActivity";
 
 export default function SettingsPanel({ root, onSaved }: { root: string; onSaved: () => Promise<void> }) {
   const t = useT();
@@ -15,23 +16,45 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
   });
   const [sourceDirectory, setSourceDirectory] = useState("");
   const [busy, setBusy] = useState(false);
+  const [dirty, setDirty] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [savedSource, setSavedSource] = useState("");
+  const activities = useProjectActivities();
+  useProjectActivity("settings", dirty, busy || loading);
   const [banner, setBanner] = useState<{ kind: "ok" | "err" | "info"; msg: string } | null>(null);
 
   useEffect(() => {
-    api.getSettings().then(setSettings).catch(() => {});
-    api.getSourceSettings().then((s) => setSourceDirectory(s.directory)).catch((e) => setBanner({ kind: "err", msg: String(e) }));
-  }, []);
+    let cancelled = false;
+    setLoading(true); setLoaded(false);
+    Promise.all([api.getSettings(), api.getSourceSettings()]).then(([next, source]) => {
+      if (cancelled) return;
+      setSettings(next); setSourceDirectory(source.directory); setSavedSource(source.directory); setLoaded(true);
+    }).catch((e) => { if (!cancelled) setBanner({ kind: "err", msg: String(e) }); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [root]);
 
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
+    setDirty(true);
     setSettings((s) => ({ ...s, [key]: value }));
   }
 
   async function onSave() {
+    if (!loaded || busy) return;
+    if ([...activities.entries()].some(([key, state]) => key !== "settings" && state.busy)) {
+      setBanner({ kind: "err", msg: t("pj.busy") }); return;
+    }
+    if (!sourceDirectory.trim()) { setBanner({ kind: "err", msg: t("pj.sourceRequired") }); return; }
+    if (sourceDirectory.trim() !== savedSource && (activities.get("workbench")?.dirty || activities.get("chapter-title")?.dirty)
+      && !window.confirm(t("pj.sourceConfirm"))) return;
     setBusy(true);
     try {
       await api.saveSettings(settings);
-      if (sourceDirectory.trim()) await api.saveSourceSettings({ directory: sourceDirectory.trim() });
+      if (sourceDirectory.trim() !== savedSource) await api.saveSourceSettings({ directory: sourceDirectory.trim() });
       await onSaved();
+      setSavedSource(sourceDirectory.trim());
+      setDirty(false);
       setBanner({ kind: "ok", msg: t("st.saved") });
     } catch (e) {
       setBanner({ kind: "err", msg: String(e) });
@@ -52,20 +75,19 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
 
   return (
     <div className="settings">
-      <div className="panel">
+      <fieldset className="panel settings-fields" disabled={busy || loading || !loaded}>
         <h2>{t("st.title")}</h2>
         <p className="muted">{t("st.desc")}</p>
 
         <Field label={t("st.projectDir")} hint={t("st.projectDirHint")}>
           <input
             value={settings.project_dir}
-            placeholder={t("st.projectDirPlaceholder")}
-            onChange={(e) => update("project_dir", e.target.value)}
+            readOnly
           />
         </Field>
 
         <Field label={t("cx.sourceDir")} hint={t("cx.sourceHint")}>
-          <input value={sourceDirectory} onChange={(e) => setSourceDirectory(e.target.value)} placeholder="正文 / chapters" />
+          <input value={sourceDirectory} onChange={(e) => { setSourceDirectory(e.target.value); setDirty(true); }} placeholder="正文 / chapters" />
         </Field>
 
         <Field label={t("st.provider")} hint={t("st.providerHint")}>
@@ -136,7 +158,7 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
           <span className="muted">{t("st.root")}</span>
           <code>{root || t("st.locating")}</code>
         </div>
-      </div>
+      </fieldset>
     </div>
   );
 }

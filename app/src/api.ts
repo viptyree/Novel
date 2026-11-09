@@ -35,14 +35,29 @@ export interface PromptPreview { prompts: PromptPair; source: string; stats: Con
 export interface ContextCandidate { id: string; label: string; chapter: number | null; }
 export interface ContextCatalog { characters: ContextCandidate[]; chapters: ContextCandidate[]; events: ContextCandidate[]; source_directory: string; chapter_file: string; notes: string; }
 export interface SourceSettings { directory: string; }
+export interface ChapterDetails { id: string; title: string; path: string; }
+export interface ProjectEntry {
+  name: string; path: string; first_opened_at: string; last_opened_at: string;
+  pinned: boolean; exists: boolean; current: boolean;
+}
+export interface OpenProjectOptions { path: string; create: boolean; name?: string; previousPath?: string; }
 
 
 export type ReportKind = "generation" | "consistency" | "memory";
 
 export const api = {
+  listProjects: () => invoke<ProjectEntry[]>("list_projects"),
+  openProject: (options: OpenProjectOptions) => invoke<string>("open_project", { ...options, name: options.name ?? null, previousPath: options.previousPath ?? null }),
+  updateProjectEntry: (path: string, pinned: boolean | null, remove = false) =>
+    invoke<void>("update_project_entry", { path, pinned, remove }),
   getPipelineRoot: () => invoke<string>("get_pipeline_root"),
 
   listChapters: () => invoke<string[]>("list_chapters"),
+  listChapterDetails: () => invoke<ChapterDetails[]>("list_chapter_details"),
+  generateChapterTitles: (projectRoot: string, chapterId: string, content: string, previousCandidates: string[]) =>
+    invoke<string[]>("generate_chapter_titles", { projectRoot, chapterId, content, previousCandidates }),
+  saveChapterTitle: (projectRoot: string, chapterId: string, title: string, expectedPath: string) =>
+    invoke<ChapterDetails>("save_chapter_title", { projectRoot, chapterId, title, expectedPath }),
   readChapter: (chapterId: string) =>
     invoke<string>("read_chapter", { chapterId }),
   saveChapter: (chapterId: string, content: string) =>

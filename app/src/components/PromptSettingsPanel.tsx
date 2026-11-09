@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api, PromptSettings, TaskPrompt } from "../api";
 import { useT } from "../i18n";
 import { Banner, Field, Spinner } from "./common";
+import { useProjectActivity } from "../projectActivity";
 
 type Category = "generation" | "consistency" | "memory";
 const CATEGORIES: Category[] = ["generation", "consistency", "memory"];
@@ -18,6 +19,7 @@ export default function PromptSettingsPanel({ onSaved }: { onSaved: () => void }
   const [category, setCategory] = useState<Category>("generation");
   const [dirty, setDirty] = useState<Set<Category>>(new Set());
   const [busy, setBusy] = useState(false);
+  useProjectActivity("prompts", dirty.size > 0, busy);
   const [banner, setBanner] = useState<{ kind: "ok" | "err" | "info"; msg: string } | null>(null);
   useEffect(() => {
     api.getPromptSettings().then(setSettings).catch((e) => setBanner({ kind: "err", msg: String(e) }));

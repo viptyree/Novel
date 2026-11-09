@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { marked } from "marked";
-import { api, ReportKind } from "../api";
+import { api, ChapterDetails, ReportKind } from "../api";
 import { useT } from "../i18n";
 import { Banner } from "./common";
 
 interface Props {
   chapters: string[];
+  chapterDetails: ChapterDetails[];
   currentChapter: string;
   setCurrentChapter: (id: string) => void;
 }
@@ -16,7 +17,7 @@ const KINDS: { key: ReportKind; labelKey: string }[] = [
   { key: "memory", labelKey: "rp.memory" },
 ];
 
-export default function Reports({ chapters, currentChapter, setCurrentChapter }: Props) {
+export default function Reports({ chapters, chapterDetails, currentChapter, setCurrentChapter }: Props) {
   const t = useT();
   const [kind, setKind] = useState<ReportKind>("consistency");
   const [html, setHtml] = useState("");
@@ -55,7 +56,7 @@ export default function Reports({ chapters, currentChapter, setCurrentChapter }:
           <option value="">{t("rp.selectChapter")}</option>
           {chapters.map((c) => (
             <option key={c} value={c}>
-              {c}
+              {t("ct.chapter", { number: Number(c.slice(2)) })}{chapterDetails.find((chapter) => chapter.id === c)?.title ? ` · ${chapterDetails.find((chapter) => chapter.id === c)?.title}` : ""}
             </option>
           ))}
         </select>

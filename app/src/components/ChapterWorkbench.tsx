@@ -1,12 +1,17 @@
 import { useEffect, useRef, useState } from "react";
-import { api, CommandResult, PromptPreview, ContextOptions, ContextCatalog, defaultContextOptions } from "../api";
+import { api, ChapterDetails, CommandResult, PromptPreview, ContextOptions, ContextCatalog, defaultContextOptions } from "../api";
+import ChapterTitlePanel from "./ChapterTitlePanel";
 import { useT } from "../i18n";
 import ContextControls, { ContextReport, estimateTokens } from "./ContextControls";
 import { Banner, Field, LogBox, Spinner } from "./common";
+import { useProjectActivity } from "../projectActivity";
 
 interface Props {
   promptRevision: number;
   chapters: string[];
+  chapterDetails: ChapterDetails[];
+  projectRoot: string;
+  selectChapter: (id: string) => void;
   currentChapter: string;
   setCurrentChapter: (id: string) => void;
   refreshChapters: () => Promise<void>;
@@ -16,6 +21,9 @@ type Busy = "" | "generate" | "consistency" | "memory" | "reset" | "save" | "pre
 
 export default function ChapterWorkbench({
   chapters,
+  chapterDetails,
+  projectRoot,
+  selectChapter,
   promptRevision,
   currentChapter,
   setCurrentChapter,
@@ -92,26 +100,36 @@ export default function ChapterWorkbench({
   const [dirty, setDirty] = useState(false);
 
   const [busy, setBusy] = useState<Busy>("");
+  const [titleBusy, setTitleBusy] = useState(false);
+  const [loadingChapter, setLoadingChapter] = useState(false);
+  const [sourceRevision, setSourceRevision] = useState(0);
+  const loadRevision = useRef(0);
+  useProjectActivity("workbench", dirty || !!idea.trim() || !!newId.trim() || !!narrative.trim() || !!draftPrompt, busy !== "" || loadingChapter);
   const [log, setLog] = useState("");
   const [banner, setBanner] = useState<{ kind: "ok" | "err" | "info"; msg: string } | null>(null);
 
   async function loadContent(id: string) {
+    const revision = ++loadRevision.current;
     if (!id) {
       setContent("");
       setDirty(false);
+      setLoadingChapter(false);
       return;
     }
+    setLoadingChapter(true);
     try {
       const text = await api.readChapter(id);
+      if (revision !== loadRevision.current) return;
       setContent(text);
       setDirty(false);
-    } catch {
-      setContent("");
-    }
+    } catch (e) {
+      if (revision === loadRevision.current) { setContent(""); setBanner({ kind: "err", msg: String(e) }); }
+    } finally { if (revision === loadRevision.current) setLoadingChapter(false); }
   }
 
   useEffect(() => {
     loadContent(currentChapter);
+    return () => { loadRevision.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentChapter]);
 
@@ -233,7 +251,8 @@ export default function ChapterWorkbench({
     }
   }
 
-  const running = busy !== "";
+  const running = busy !== "" || titleBusy || loadingChapter;
+  const currentDetails = chapterDetails.find((chapter) => chapter.id === currentChapter);
 
   return (
     <div className="workbench">
@@ -241,11 +260,11 @@ export default function ChapterWorkbench({
         <h2>{t("wb.chapter")}</h2>
         <div className="row">
           <Field label={t("wb.selectChapter")}>
-            <select value={currentChapter} onChange={(e) => setCurrentChapter(e.target.value)}>
+            <select value={currentChapter} disabled={running} onChange={(e) => selectChapter(e.target.value)}>
               <option value="">{t("wb.none")}</option>
               {chapters.map((c) => (
                 <option key={c} value={c}>
-                  {c}
+                  {t("ct.chapter", { number: Number(c.slice(2)) })}{chapterDetails.find((chapter) => chapter.id === c)?.title ? ` · ${chapterDetails.find((chapter) => chapter.id === c)?.title}` : ""}
                 </option>
               ))}
             </select>
@@ -296,7 +315,7 @@ export default function ChapterWorkbench({
         </div>
 
         <ContextControls chapterId={(currentChapter || newId).trim()} options={contextOptions}
-          onChange={setContextOptions} revision={promptRevision} catalog={catalog} setCatalog={setCatalog} disabled={running} />
+          onChange={setContextOptions} revision={promptRevision + sourceRevision} catalog={catalog} setCatalog={setCatalog} disabled={running} />
 
         <details className="narrative">
           <summary>{t("wb.narrativeSection")}</summary>
@@ -339,6 +358,14 @@ export default function ChapterWorkbench({
       </div>
 
       <div className="panel">
+        {currentDetails && <ChapterTitlePanel key={currentChapter} chapter={currentDetails} projectRoot={projectRoot}
+          content={loadingChapter ? "" : content} disabled={busy !== "" || loadingChapter} onBusyChange={setTitleBusy}
+          onSaved={async () => {
+            await refreshChapters();
+            setConfirmedPrompt(undefined); setConfirmedInput("");
+            setSourceRevision((n) => n + 1);
+            setCatalog(await api.contextCatalog(currentChapter));
+          }} />}
         <div className="panel-head">
           <h2>
             {t("wb.bodyTitle")} {currentChapter ? `· ${currentChapter}` : ""}
@@ -359,7 +386,7 @@ export default function ChapterWorkbench({
             setContent(e.target.value);
             setDirty(true);
           }}
-          disabled={!currentChapter}
+          disabled={!currentChapter || loadingChapter || busy === "generate" || busy === "save" || busy === "reset"}
         />
         <div className="wordcount">
           {content.length} {t("wb.words")}

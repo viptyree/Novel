@@ -840,3 +840,31 @@ textarea.prompt-user { min-height: 350px; line-height: 1.7; }
 .source-path { overflow-wrap: anywhere; font-size: 12px; }
 .author-notes { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; font-family: inherit; }
 .context-report { margin: 14px 0; }
+
+.topbar-project { display: flex; align-items: center; gap: 18px; min-width: 0; }
+.project-trigger { display: flex; align-items: center; gap: 8px; min-width: 0; max-width: 350px; }
+.project-trigger strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-trigger .muted { white-space: nowrap; }
+fieldset.project-page { margin: 0; border: 0; min-width: 0; }
+fieldset.settings-fields { margin: 0; min-width: 0; }
+fieldset.project-page:disabled { opacity: .65; pointer-events: none; }
+.project-dialog { width: min(760px, calc(100vw - 48px)); }
+.project-dialog-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.project-dialog-header h2 { margin: 0; }
+.project-list { display: grid; gap: 12px; margin-top: 18px; }
+.project-entry { border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 16px; display: grid; gap: 8px; }
+.project-entry.current { border-color: var(--accent); background: var(--accent-weak); }
+.project-entry .actions { margin-top: 4px; flex-wrap: wrap; }
+.project-badge, .project-missing { margin-left: 10px; font-size: 12px; }
+.project-badge { color: var(--accent); }
+.project-missing { color: var(--danger); }
+.chapter-title-panel { margin-bottom: 18px; padding-bottom: 14px; border-bottom: 1px solid var(--border-strong); }
+.chapter-title-input { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.chapter-title-input input { flex: 1 1 220px; min-width: 0; }
+.chapter-title-candidates { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.chapter-title-candidates .selected { border-color: var(--accent); background: var(--accent-weak); }
+@media (max-width: 1050px) {
+  .topbar-project { gap: 10px; }
+  .project-trigger { max-width: 260px; }
+  .project-trigger .muted { display: none; }
+}

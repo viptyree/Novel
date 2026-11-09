@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "../api";
 import { useUi } from "../i18n";
 import { Banner, Spinner } from "./common";
+import { useProjectActivity } from "../projectActivity";
 
 type Bi = { zh: string; en: string };
 
@@ -69,6 +70,7 @@ export default function MemoryEditor() {
   const [content, setContent] = useState("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
+  useProjectActivity("memory", dirty, busy);
   const [banner, setBanner] = useState<{ kind: "ok" | "err" | "info"; msg: string } | null>(null);
 
   async function load(def: FileDef) {

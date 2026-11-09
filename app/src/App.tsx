@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
-import { api } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { api, ChapterDetails, OpenProjectOptions } from "./api";
+import ProjectSwitcher from "./components/ProjectSwitcher";
+import { ProjectActivityProvider, useProjectActivities } from "./projectActivity";
 import { useUi, Lang, Theme } from "./i18n";
 import logo from "./assets/logo.png";
 import ChapterWorkbench from "./components/ChapterWorkbench";
@@ -38,30 +40,77 @@ const THEMES: { key: Theme; icon: string; labelKey: string }[] = [
 ];
 
 export default function App() {
+  return <ProjectActivityProvider><AppContent /></ProjectActivityProvider>;
+}
+
+function AppContent() {
   const { t, lang, setLang, theme, setTheme } = useUi();
+  const activities = useProjectActivities();
   const [tab, setTab] = useState<Tab>("workbench");
-  const [chapters, setChapters] = useState<string[]>([]);
+  const [chapterDetails, setChapterDetails] = useState<ChapterDetails[]>([]);
+  const chapters = chapterDetails.map((chapter) => chapter.id);
   const [currentChapter, setCurrentChapter] = useState("");
   const [sourceKey, setSourceKey] = useState("");
   const [root, setRoot] = useState("");
   const [error, setError] = useState("");
   const [promptRevision, setPromptRevision] = useState(0);
+  const [switching, setSwitching] = useState(false);
+  const [projectRevision, setProjectRevision] = useState(0);
+  const switchPending = useRef(false);
+  const projectEpoch = useRef(0);
+
+  async function openProject(options: OpenProjectOptions): Promise<boolean> {
+    if (switchPending.current) return false;
+    if ([...activities.values()].some((a) => a.busy)) throw new Error(t("pj.busy"));
+    if ([...activities.values()].some((a) => a.dirty) && !window.confirm(t("pj.discardConfirm"))) return false;
+    switchPending.current = true;
+    setSwitching(true);
+    try {
+      const nextRoot = await api.openProject(options);
+      projectEpoch.current += 1;
+      // Clear old project state immediately, even if loading the target fails.
+      setRoot(nextRoot); setCurrentChapter(""); setChapterDetails([]); setSourceKey(""); setError("");
+      setProjectRevision((n) => n + 1);
+      setPromptRevision((n) => n + 1);
+      try {
+        const [nextChapters, source] = await Promise.all([api.listChapterDetails(), api.getSourceSettings()]);
+        setChapterDetails(nextChapters); setSourceKey(source.directory);
+      } catch (e) { setError(String(e)); }
+      return true;
+    } finally { switchPending.current = false; setSwitching(false); }
+  }
 
   const refreshChapters = useCallback(async () => {
     try {
-      setChapters(await api.listChapters());
+      setChapterDetails(await api.listChapterDetails());
     } catch (e) {
       setError(String(e));
     }
   }, []);
 
   useEffect(() => {
-    api.getPipelineRoot().then(setRoot).catch((e) => setError(String(e)));
-    refreshChapters();
-    api.getSourceSettings().then((s) => setSourceKey(s.directory)).catch((e) => setError(String(e)));
-  }, [refreshChapters]);
+    let cancelled = false;
+    const epoch = projectEpoch.current;
+    Promise.allSettled([api.getPipelineRoot(), api.listChapterDetails(), api.getSourceSettings()]).then(([project, list, source]) => {
+      if (cancelled || epoch !== projectEpoch.current) return;
+      if (project.status === "fulfilled") setRoot(project.value);
+      if (list.status === "fulfilled") setChapterDetails(list.value);
+      if (source.status === "fulfilled") setSourceKey(source.value.directory);
+      const failed = [project, list, source].find((r) => r.status === "rejected");
+      if (failed?.status === "rejected") setError(String(failed.reason));
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   const currentLabel = NAV.find((n) => n.key === tab)?.labelKey ?? "";
+
+  function selectChapter(id: string) {
+    if (id === currentChapter) return;
+    if ([...activities.values()].some((state) => state.busy)) { setError(t("pj.busy")); return; }
+    if (["workbench", "chapter-title"].some((key) => activities.get(key)?.dirty)
+      && !window.confirm(t("ct.switchConfirm"))) return;
+    setError(""); setCurrentChapter(id);
+  }
 
   return (
     <div className="app">
@@ -104,7 +153,9 @@ export default function App() {
 
       <main className="content">
         <header className="topbar">
-          <h1 className="topbar-title">{t(currentLabel)}</h1>
+          <div className="topbar-project"><h1 className="topbar-title">{t(currentLabel)}</h1>
+            <ProjectSwitcher root={root} onOpen={openProject} />
+          </div>
           <div className="topbar-controls">
             <div className="seg" role="group" aria-label={t("topbar.theme")}>
               {THEMES.map((th) => (
@@ -132,7 +183,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="page">
+        <fieldset className="page project-page" disabled={switching} key={projectRevision}>
           {error ? <div className="banner banner-err">{error}</div> : null}
 
           <div hidden={tab !== "workbench"}>
@@ -140,6 +191,9 @@ export default function App() {
               key={`${root}:${sourceKey}`}
               promptRevision={promptRevision}
               chapters={chapters}
+              chapterDetails={chapterDetails}
+              projectRoot={root}
+              selectChapter={selectChapter}
               currentChapter={currentChapter}
               setCurrentChapter={setCurrentChapter}
               refreshChapters={refreshChapters}
@@ -148,21 +202,22 @@ export default function App() {
           {tab === "reports" && (
             <Reports
               chapters={chapters}
+              chapterDetails={chapterDetails}
               currentChapter={currentChapter}
-              setCurrentChapter={setCurrentChapter}
+              setCurrentChapter={selectChapter}
             />
           )}
-          {tab === "memory" && <MemoryEditor />}
+          <div hidden={tab !== "memory"}><MemoryEditor /></div>
           <div hidden={tab !== "prompts"}><PromptSettingsPanel key={root} onSaved={() => setPromptRevision((n) => n + 1)} /></div>
-          {tab === "settings" && <SettingsPanel root={root} onSaved={async () => {
+          <div hidden={tab !== "settings"}><SettingsPanel root={root} onSaved={async () => {
             setPromptRevision((n) => n + 1);
             const nextRoot = await api.getPipelineRoot();
             const source = await api.getSourceSettings();
             if (nextRoot !== root || source.directory !== sourceKey) { setRoot(nextRoot); setSourceKey(source.directory); setCurrentChapter(""); }
             await refreshChapters();
-          }} />}
+          }} /></div>
           {tab === "guide" && <Guide />}
-        </div>
+        </fieldset>
       </main>
     </div>
   );
