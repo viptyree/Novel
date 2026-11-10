@@ -1,19 +1,4 @@
 use super::*;
-use std::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
-
-// Readers hold this for the entire operation, including background generation.
-// Switching uses try_write so it fails immediately while a task is running.
-static PROJECT_ACCESS: RwLock<()> = RwLock::new(());
-static REGISTRY_ACCESS: Mutex<()> = Mutex::new(());
-
-pub fn read_access() -> Result<RwLockReadGuard<'static, ()>, String> {
-    PROJECT_ACCESS.read().map_err(|_| "项目状态不可用，请重启应用".into())
-}
-
-pub fn switch_access() -> Result<RwLockWriteGuard<'static, ()>, String> {
-    PROJECT_ACCESS.try_write().map_err(|_| "项目正在执行操作，请完成后再切换".into())
-}
-
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ProjectEntry {
     pub name: String,
@@ -36,11 +21,11 @@ struct Registry {
     projects: Vec<ProjectEntry>,
 }
 
-fn registry_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("projects.json"))
+fn registry_path(app: &Context) -> Result<PathBuf, String> {
+    Ok(app.data_dir().map_err(|e| e.to_string())?.join("projects.json"))
 }
 
-fn load(app: &tauri::AppHandle) -> Result<Registry, String> {
+fn load(app: &Context) -> Result<Registry, String> {
     match fs::read_to_string(registry_path(app)?) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("项目列表损坏，请保留文件后修复：{e}")),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Registry::default()),
@@ -52,13 +37,10 @@ pub fn atomic_json<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let temp = path.with_extension("json.tmp");
-    fs::write(&temp, serde_json::to_string_pretty(value).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    fs::rename(&temp, path).map_err(|e| e.to_string())
+    atomic_write(path, serde_json::to_string_pretty(value).map_err(|e| e.to_string())?.as_bytes())
 }
 
-fn normalized(path: &Path) -> PathBuf {
+pub fn normalized(path: &Path) -> PathBuf {
     let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     // Keep comparisons stable after a Windows directory goes missing: canonicalize
     // adds a verbatim prefix while the legacy settings path may not have one.
@@ -111,11 +93,10 @@ fn recognizable(path: &Path) -> bool {
         || ["config.yaml", ".initialized", ".chapter-source.json"].iter().any(|p| path.join(p).is_file())
 }
 
-pub fn remember_startup(app: &tauri::AppHandle) -> Result<(), String> {
-    let _access = switch_access()?;
-    let _registry = REGISTRY_ACCESS.lock().map_err(|e| e.to_string())?;
+pub fn remember_startup(app: &Context) -> Result<(), String> {
+    let _global = app.global_access()?;
     let mut registry = load(app)?;
-    let mut settings = load_settings(app);
+    let mut settings = Context::read_settings(&app.data_dir)?;
     let current = resolve_project_dir(app);
     // Initialize the default once, then persist its path so a deleted default
     // is treated as missing rather than silently recreated on later launches.
@@ -123,19 +104,21 @@ pub fn remember_startup(app: &tauri::AppHandle) -> Result<(), String> {
         let known = registry.projects.iter().any(|e| same_path(Path::new(&e.path), &current));
         if current.is_dir() || !known {
             fs::create_dir_all(&current).map_err(|e| e.to_string())?;
-            ensure_project_initialized(&current, app)?;
+
         }
         settings.project_dir = normalized(&current).to_string_lossy().into_owned();
         atomic_json(&settings_path(app), &settings)?;
+    }
+    if current.is_dir() && !current.join(".initialized").exists() {
+        let _project = app.write_access()?;
+        ensure_project_initialized(&current, app)?;
     }
     register(&mut registry, &normalized(&current), None, current.is_dir());
     atomic_json(&registry_path(app)?, &registry)
 }
 
-#[tauri::command]
-pub fn list_projects(app: tauri::AppHandle) -> Result<Vec<ProjectView>, String> {
-    let _access = read_access()?;
-    let _registry = REGISTRY_ACCESS.lock().map_err(|e| e.to_string())?;
+pub fn list_projects(app: Context) -> Result<Vec<ProjectView>, String> {
+    let _global = app.global_access()?;
     let mut registry = load(&app)?;
     let current = resolve_project_dir(&app);
     // Migrate the old single path even when its directory has gone missing.
@@ -148,10 +131,8 @@ pub fn list_projects(app: tauri::AppHandle) -> Result<Vec<ProjectView>, String> 
     }).collect())
 }
 
-#[tauri::command]
-pub fn open_project(app: tauri::AppHandle, path: String, create: bool, name: Option<String>, previous_path: Option<String>) -> Result<String, String> {
-    let _access = switch_access()?;
-    let _registry = REGISTRY_ACCESS.lock().map_err(|e| e.to_string())?;
+pub fn open_project(app: Context, path: String, create: bool, name: Option<String>, previous_path: Option<String>) -> Result<String, String> {
+    let _global = app.global_access()?;
     let mut registry = load(&app)?;
     let requested = absolute(&path)?;
     if create {
@@ -174,6 +155,8 @@ pub fn open_project(app: tauri::AppHandle, path: String, create: bool, name: Opt
             return Err("目标目录已在项目列表中，请直接打开该项目".into());
         }
     }
+    let target = Context::new(app.data_dir.clone(), Some(root.clone()))?;
+    let _project = target.write_access()?;
     ensure_project_initialized(&root, &app)?;
     // Preserve name and pin when repairing a moved directory.
     if let Some(previous) = previous_path {
@@ -181,7 +164,7 @@ pub fn open_project(app: tauri::AppHandle, path: String, create: bool, name: Opt
         entry.path = root.to_string_lossy().into_owned();
     }
     register(&mut registry, &root, name.as_deref(), true);
-    let mut settings = load_settings(&app);
+    let mut settings = Context::read_settings(&app.data_dir)?;
     settings.project_dir = root.to_string_lossy().into_owned();
     // Publish the active path last, after validation and registry persistence.
     atomic_json(&registry_path(&app)?, &registry)?;
@@ -189,10 +172,8 @@ pub fn open_project(app: tauri::AppHandle, path: String, create: bool, name: Opt
     Ok(settings.project_dir)
 }
 
-#[tauri::command]
-pub fn update_project_entry(app: tauri::AppHandle, path: String, pinned: Option<bool>, remove: bool) -> Result<(), String> {
-    let _access = read_access()?;
-    let _registry = REGISTRY_ACCESS.lock().map_err(|e| e.to_string())?;
+pub fn update_project_entry(app: Context, path: String, pinned: Option<bool>, remove: bool) -> Result<(), String> {
+    let _global = app.global_access()?;
     let mut registry = load(&app)?;
     if remove {
         if same_path(Path::new(&path), &resolve_project_dir(&app)) { return Err("请先切换到其他项目，再移除当前项目记录".into()); }

@@ -165,36 +165,20 @@ flowchart LR
 
 ---
 
-## ⌨️ 命令行版（进阶 / 习惯终端的用户）
+## ⌨️ Rust CLI 与 SSH
 
-桌面应用之外，`scripts/*.py` 提供等价的命令行流程（需 Python 3.10+ 与 `openai`、`pyyaml`）。
-
-<details>
-<summary>展开命令行用法</summary>
+输入 `novel` 即可进入中文菜单，管理项目、生成/编辑章节、检查一致性、更新记忆、编辑设定与提示词、查看报告。GUI 与 CLI 共享同一 Rust 引擎和创作文件。
 
 ```powershell
-# 1. 生成一章
-python scripts/generate_chapter_local.py --chapter ch001 --idea "第一章：主角回到故乡，发现父亲留下的一封信，决定调查多年前的旧事。" --target-words 4000 --overwrite
-
-# 2. 一致性检查
-python scripts/check_consistency.py --chapter ch001
-
-# 3. 更新长期记忆
-python scripts/update_memory_after_chapter.py --chapter ch001
-
-# 4. 重置某章（默认只删正文/报告；加 --include-memory 连带过滤摘要/事件/时间线）
-python scripts/reset_chapter.py --chapter ch001
+novel
+novel project open "D:\小说\我的书"
+novel chapter generate ch001 --idea-file idea.txt --target-words 4000 --detach
+novel job list
 ```
 
-`generate_chapter_local.py` 常用参数：
+Windows 安装器包含 CLI 与当前用户 PATH 选项；也提供 Windows/macOS/Linux 独立 CLI 包。从其他电脑或 Android SSH 客户端连接家中 Windows 后即可运行。模型任务在独立 worker 中执行，SSH 断连后可重连查看结果。
 
-- `--idea` / `--idea-file`：二选一
-- `--target-words`：目标中文字数，默认 4000
-- `--overwrite`：允许覆盖已有 `chapter.md`
-- `--no-context`：不读取长期记忆，只按 idea 生成
-- `--dry-run`：只构建 prompt 和报告，不调用 LLM
-
-</details>
+从源码安装：`cargo install --locked --path crates/novel-cli`。CLI 构建无需 Python、Node 或 WebView。详细命令、后台任务和 SSH 使用见 [CLI 指南](docs/CLI.md)。历史 `scripts/*.py` 保留供旧流程使用。
 
 ---
 

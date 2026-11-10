@@ -27,12 +27,16 @@ jobs:
       matrix:
         include:
           - platform: macos-latest # Apple Silicon (arm64) → .dmg
+            target: aarch64-apple-darwin
             args: "--target aarch64-apple-darwin --bundles dmg"
           - platform: macos-latest # Intel (x86_64) → .dmg
+            target: x86_64-apple-darwin
             args: "--target x86_64-apple-darwin --bundles dmg"
           - platform: ubuntu-22.04 # → .AppImage / .deb
+            target: x86_64-unknown-linux-gnu
             args: "--bundles appimage,deb"
           - platform: windows-latest # → NSIS setup.exe
+            target: x86_64-pc-windows-msvc
             args: "--bundles nsis"
 
     runs-on: ${{ matrix.platform }}
@@ -55,7 +59,7 @@ jobs:
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: app/src-tauri
+          workspaces: ". -> target"
 
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
@@ -66,6 +70,24 @@ jobs:
       - name: Install frontend dependencies
         working-directory: app
         run: npm ci
+
+      - name: Build standalone CLI
+        run: cargo build --locked --release -p novel-cli --target ${{ matrix.target }}
+
+      - name: Package standalone CLI
+        shell: bash
+        run: |
+          mkdir -p cli-package
+          cp README.md README_EN.md LICENSE cli-package/
+          mkdir -p cli-package/docs
+          cp docs/CLI.md cli-package/docs/
+          if [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
+            cp target/${{ matrix.target }}/release/novel.exe cli-package/
+            7z a novel-cli-${{ matrix.target }}.zip ./cli-package/*
+          else
+            cp target/${{ matrix.target }}/release/novel cli-package/
+            tar -czf novel-cli-${{ matrix.target }}.tar.gz -C cli-package .
+          fi
 
       - name: Build and release (Tauri)
         uses: tauri-apps/tauri-action@v0
@@ -86,7 +108,17 @@ jobs:
             - Windows：`*-setup.exe`（NSIS 安装器）
             - macOS：`*.dmg`（arm64 / x64）
             - Linux：`*.AppImage` 或 `*.deb`
+            - 独立 CLI：`novel-cli-<target>.zip` / `novel-cli-<target>.tar.gz`
+
+            Windows 安装器包含 novel 命令；其他平台可解压独立 CLI 后加入 PATH。
 
             首次使用：打开后到「设置」填入本地 OpenAI 兼容服务地址（含 http://，多数在 /v1 下），即可开始。
             注：安装包未做代码签名，首次打开可能需在系统中允许运行。
           args: ${{ matrix.args }}
+
+      - name: Upload standalone CLI to release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'latest' }}
+        run: gh release upload "$RELEASE_TAG" novel-cli-${{ matrix.target }}.* --clobber

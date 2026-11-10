@@ -40,7 +40,7 @@ fn validate_title(title: &str) -> Result<String, String> {
     Ok(title.to_owned())
 }
 
-fn check_project(app: &tauri::AppHandle, root: &str) -> Result<PathBuf, String> {
+fn check_project(app: &Context, root: &str) -> Result<PathBuf, String> {
     let active = resolve_project_dir(app);
     if !project_manager::same_path(Path::new(root), &active) {
         return Err("项目已切换，请重新选择章节".into());
@@ -48,18 +48,16 @@ fn check_project(app: &tauri::AppHandle, root: &str) -> Result<PathBuf, String> 
     Ok(active)
 }
 
-#[tauri::command]
-pub fn list_chapter_details(app: tauri::AppHandle) -> Result<Vec<ChapterDetails>, String> {
-    let _access = project_manager::read_access()?;
+pub fn list_chapter_details(app: Context) -> Result<Vec<ChapterDetails>, String> {
+    let _access = app.read_access()?;
     let config = build_run_config(&app)?;
     details(&config.project_dir)
 }
 
-#[tauri::command]
-pub async fn generate_chapter_titles(app: tauri::AppHandle, project_root: String, chapter_id: String,
+pub fn generate_chapter_titles(app: Context, project_root: String, chapter_id: String,
     content: String, previous_candidates: Vec<String>) -> Result<Vec<String>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _access = project_manager::read_access()?;
+        let _access = app.operation_access()?;
+        app.stage("调用模型生成章名")?;
         let root = check_project(&app, &project_root)?;
         let n = project_source::number(&chapter_id).filter(|n| *n > 0).ok_or("无效章号")?;
         if content.trim().is_empty() { return Err("请先生成或填写章节正文".into()); }
@@ -79,6 +77,7 @@ pub async fn generate_chapter_titles(app: tauri::AppHandle, project_root: String
             "previous_candidates": previous_candidates, "chapter_text": content,
         }).to_string(), &settings);
         let raw = run_completion(&config, &settings, sys_user_messages(system, &user), 0.8, 0.9, None)?;
+        app.stage("解析章名")?;
         let data = parse_extraction_json(&clean_output(&raw))?;
         let values = data.get("titles").and_then(|v| v.as_array()).ok_or("模型未返回有效的章名列表，请重新生成")?;
         if values.len() != 3 { return Err("模型需要返回三个候选章名，请重新生成".into()); }
@@ -92,7 +91,6 @@ pub async fn generate_chapter_titles(app: tauri::AppHandle, project_root: String
             titles.push(title);
         }
         Ok(titles)
-    }).await.map_err(|e| e.to_string())?
 }
 
 // Windows MoveFileW fails if the destination exists, unlike fs::rename which
@@ -126,12 +124,11 @@ fn rename_no_replace(source: &Path, target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub fn save_chapter_title(app: tauri::AppHandle, project_root: String, chapter_id: String,
+pub fn save_chapter_title(app: Context, project_root: String, chapter_id: String,
     title: String, expected_path: String) -> Result<ChapterDetails, String> {
     // Renaming is exclusive so generation, saves and memory extraction cannot
     // continue against an old filename halfway through an operation.
-    let _access = project_manager::switch_access()?;
+    let _access = app.write_access()?;
     let root = check_project(&app, &project_root)?;
     let title = validate_title(&title)?;
     let number = project_source::number(&chapter_id).filter(|n| *n > 0).ok_or("无效章号")?;

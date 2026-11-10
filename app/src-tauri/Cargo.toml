@@ -28,3 +28,4 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 regex = "1"
 chrono = "0.4"
 
+novel-core = { path = "../../crates/novel-core" }

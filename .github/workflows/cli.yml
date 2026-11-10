@@ -1,0 +1,25 @@
+name: Rust CLI checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+      - run: cargo test --locked -p novel-core -p novel-cli
+      - name: Test terminal navigation
+        if: runner.os != 'Windows'
+        run: python3 scripts/test-tui-navigation.py
+      - run: cargo build --locked --release -p novel-cli
+      - name: Test user PATH maintenance
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: ./scripts/test-cli-path.ps1

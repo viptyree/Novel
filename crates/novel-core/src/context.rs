@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(default)]
 pub struct Options {
+    pub generation_preset: Option<GenerationPreset>,
     pub automatic: bool,
     pub characters: Vec<String>,
     pub chapters: Vec<String>,
@@ -18,6 +19,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
+            generation_preset: None,
             automatic: true,
             characters: vec![],
             chapters: vec![],
@@ -148,12 +150,7 @@ pub fn snapshot(root: &Path, id: &str) -> Result<(), String> {
             fs::copy(source, target.join(name)).map_err(|e| e.to_string())?;
         }
     }
-    fs::write(
-        root.join("memory/state_metadata.json"),
-        serde_json::to_string(&serde_json::json!({"through_chapter":n}))
-            .map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
+    project_manager::atomic_json(&root.join("memory/state_metadata.json"), &serde_json::json!({"through_chapter":n}))?;
     Ok(())
 }
 
@@ -327,6 +324,8 @@ pub fn build(
             ("relationships", "关系"),
             ("constraints", "连续性参考（可随本章明确事件更新）"),
         ] {
+            if opts.generation_preset == Some(GenerationPreset::Compact)
+                && matches!(key, "personality" | "speaking_style") { continue; }
             let value = person
                 .get(key)
                 .map(|v| {
@@ -341,7 +340,10 @@ pub fn build(
                 text.push(format!("- {}：{}", label, value));
             }
         }
-        let text = text.join("\n");
+        let text = if opts.generation_preset == Some(GenerationPreset::Compact) {
+            format!("{}：{}", name, text.into_iter().skip(1)
+                .map(|line| line.trim_start_matches("- ").to_string()).collect::<Vec<_>>().join("；"))
+        } else { text.join("\n") };
         if let Some(source) = stats.sources.last_mut() {
             source.characters = text.chars().count();
         }
@@ -437,6 +439,7 @@ pub fn build(
         }
     }
     summary_text.sort_by_key(|(n, _)| *n);
+    let mut compact_history = summary_text.clone();
     sections.insert(
         "Recent Chapter Summaries".into(),
         summary_text
@@ -525,7 +528,7 @@ pub fn build(
         );
         if include {
             let time = string(e, "time_order");
-            event_text.push(format!(
+            let text = format!(
                 "- [{}{}] {}",
                 string(e, "chapter_id"),
                 if time.is_empty() {
@@ -534,7 +537,9 @@ pub fn build(
                     format!(" / {}", time)
                 },
                 desc
-            ));
+            );
+            compact_history.push((chapter(e).unwrap_or(0), text.clone()));
+            event_text.push(text);
         }
     }
     for eid in &opts.events {
@@ -543,6 +548,18 @@ pub fn build(
         }
     }
     sections.insert("Recent Events".into(), event_text.join("\n"));
+    // Work with whole source records so reference chapter paragraphs are never altered.
+    // Only identical facts from the same chapter are deduplicated; repeated later actions remain.
+    compact_history.sort_by_key(|(n, _)| *n);
+    let mut history_seen = HashSet::new();
+    let compact_history = compact_history.into_iter().filter_map(|(n, text)| {
+        if text.starts_with("参考正文 [") { return Some(text); }
+        let fact = text.split_once("] ").map(|(_, body)| body).unwrap_or(&text).trim().to_string();
+        if history_seen.insert((n, fact)) { Some(text) } else { None }
+    }).collect::<Vec<_>>().join("\n\n");
+    if opts.generation_preset == Some(GenerationPreset::Compact) {
+        sections.insert("Compact Prelude".into(), compact_history);
+    }
     sections.insert("Timeline".into(), String::new());
 
     let bible = from_yaml(&state_dir.join("story_bible.yaml"))?;
@@ -670,7 +687,7 @@ pub fn build(
     sections.insert("Style References".into(), style_text.join("\n\n"));
     let conflict_sources = sections
         .iter()
-        .filter(|(k, _)| k.as_str() != "Style References")
+        .filter(|(k, _)| !matches!(k.as_str(), "Style References" | "Compact Prelude"))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     Ok(Memory {
@@ -740,14 +757,7 @@ pub fn catalog(root: &Path, id: &str) -> Result<Catalog, String> {
 mod tests {
     use super::*;
     fn root() -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "novel_context_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let root = tempfile::tempdir().unwrap().keep();
         fs::create_dir_all(root.join("memory")).unwrap();
         root
     }

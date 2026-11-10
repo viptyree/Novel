@@ -166,36 +166,19 @@ All models: **<https://huggingface.co/yuxinlu1>**
 
 ---
 
-## ⌨️ Command-line version (advanced / terminal users)
+## ⌨️ Rust CLI and SSH
 
-Besides the desktop app, `scripts/*.py` provides the equivalent CLI flow (needs Python 3.10+ with `openai` and `pyyaml`).
+Run `novel` for the Chinese interactive menu, or use standard subcommands. The desktop and CLI share the Rust engine, projects, model settings, chapters, memory, prompts and reports.
 
-<details>
-<summary>Show CLI usage</summary>
-
-```powershell
-# 1. Generate a chapter
-python scripts/generate_chapter_local.py --chapter ch001 --idea "Ch.1: the hero returns home, finds a letter from his father, and decides to investigate an old case." --target-words 4000 --overwrite
-
-# 2. Consistency check
-python scripts/check_consistency.py --chapter ch001
-
-# 3. Update long-term memory
-python scripts/update_memory_after_chapter.py --chapter ch001
-
-# 4. Reset a chapter (text/reports only; add --include-memory to also filter summaries/events/timeline)
-python scripts/reset_chapter.py --chapter ch001
+```sh
+novel
+novel chapter generate ch001 --idea-file idea.txt --detach
+novel job list
 ```
 
-`generate_chapter_local.py` common flags:
+The Windows installer includes the CLI with an optional user PATH entry. Standalone Windows, macOS and Linux archives are also built. Connect to your home Windows computer using SSH from a PC or Android client; independent workers keep model tasks running after disconnection.
 
-- `--idea` / `--idea-file`: pick one
-- `--target-words`: target length, default 4000
-- `--overwrite`: allow overwriting an existing `chapter.md`
-- `--no-context`: ignore long-term memory, generate from the idea only
-- `--dry-run`: only build the prompt and report, don't call the LLM
-
-</details>
+Install from source with `cargo install --locked --path crates/novel-cli`; CLI builds need no Python, Node or WebView. See the [CLI guide](docs/CLI.md) for commands, SSH setup and task behavior. Existing Python scripts remain as legacy entrypoints.
 
 ---
 

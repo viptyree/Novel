@@ -1,0 +1,26 @@
+[package]
+name = "novel-cli"
+version = "0.3.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "novel"
+path = "src/main.rs"
+
+[dependencies]
+novel-core = { path = "../novel-core" }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+ratatui = "0.29"
+crossterm = "0.28"
+chrono = "0.4"
+ctrlc = "3"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
+libc = "0.2"
+fs2 = "0.4"
+unicode-width = "0.2"
+shell-words = "1"

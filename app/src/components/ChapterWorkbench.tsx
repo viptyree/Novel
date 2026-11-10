@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, ChapterDetails, CommandResult, PromptPreview, ContextOptions, ContextCatalog, defaultContextOptions } from "../api";
+import { api, ChapterDetails, CommandResult, PromptPreview, ContextOptions, ContextCatalog, defaultContextOptions, GenerationPreset } from "../api";
 import ChapterTitlePanel from "./ChapterTitlePanel";
 import { useT } from "../i18n";
 import ContextControls, { ContextReport, estimateTokens } from "./ContextControls";
@@ -31,6 +31,7 @@ export default function ChapterWorkbench({
 }: Props) {
   const t = useT();
   const [contextOptions, setContextOptions] = useState<ContextOptions>({ ...defaultContextOptions });
+  const [projectPreset, setProjectPreset] = useState<GenerationPreset>("general");
   const [catalog, setCatalog] = useState<ContextCatalog | null>(null);
   const [newId, setNewId] = useState("");
   const [idea, setIdea] = useState("");
@@ -53,8 +54,15 @@ export default function ChapterWorkbench({
   const promptStale = !!confirmedPrompt && confirmedInput !== inputKey;
 
   useEffect(() => {
+    let active = true;
+    api.getPromptSettings().then((settings) => { if (active) setProjectPreset(settings.generation_preset); })
+      .catch((e) => { if (active) setBanner({ kind: "err", msg: String(e) }); });
+    return () => { active = false; };
+  }, [promptRevision]);
+
+  useEffect(() => {
     setConfirmedPrompt(undefined); setConfirmedInput("");
-    setContextOptions((o) => ({ ...o, characters: [], chapters: [], events: [] }));
+    setContextOptions((o) => ({ ...o, characters: [], chapters: [], events: [], generation_preset: null }));
   }, [(currentChapter || newId).trim()]);
   useEffect(() => {
     if (draftPrompt && !dialogRef.current?.open) dialogRef.current?.showModal();
@@ -70,7 +78,8 @@ export default function ChapterWorkbench({
     try {
       const fresh = await api.previewPrompt(id, idea.trim(), targetWords, useContext, buildPov(), narrative.trim(), contextOptions);
       setFreshPrompt(fresh);
-      setDraftPrompt(confirmedPrompt ? { ...confirmedPrompt, stats: fresh.stats } : fresh);
+      setDraftPrompt(confirmedPrompt && confirmedInput === inputKey && confirmedPrompt.source === fresh.source
+        ? { ...confirmedPrompt, stats: fresh.stats } : fresh);
     } catch (e) {
       setBanner({ kind: "err", msg: String(e) });
     } finally { setBusy(""); }
@@ -97,6 +106,7 @@ export default function ChapterWorkbench({
   }
 
   const [content, setContent] = useState("");
+  const savedContent = useRef("");
   const [dirty, setDirty] = useState(false);
 
   const [busy, setBusy] = useState<Busy>("");
@@ -111,6 +121,7 @@ export default function ChapterWorkbench({
   async function loadContent(id: string) {
     const revision = ++loadRevision.current;
     if (!id) {
+      savedContent.current = "";
       setContent("");
       setDirty(false);
       setLoadingChapter(false);
@@ -121,6 +132,7 @@ export default function ChapterWorkbench({
       const text = await api.readChapter(id);
       if (revision !== loadRevision.current) return;
       setContent(text);
+      savedContent.current = text;
       setDirty(false);
     } catch (e) {
       if (revision === loadRevision.current) { setContent(""); setBanner({ kind: "err", msg: String(e) }); }
@@ -192,7 +204,8 @@ export default function ChapterWorkbench({
     if (!currentChapter) return;
     setBusy("save");
     try {
-      await api.saveChapter(currentChapter, content);
+      await api.saveChapter(currentChapter, content, savedContent.current);
+      savedContent.current = content;
       setDirty(false);
       setBanner({ kind: "ok", msg: t("wb.saved") });
     } catch (e) {
@@ -243,6 +256,8 @@ export default function ChapterWorkbench({
       if (res.success) {
         await refreshChapters();
         setContent("");
+        savedContent.current = "";
+        setDirty(false);
       }
     } catch (e) {
       setBanner({ kind: "err", msg: String(e) });
@@ -313,6 +328,15 @@ export default function ChapterWorkbench({
             </label>
           </div>
         </div>
+
+        <Field label={t("pr.chapterPreset")} hint={t("pr.chapterPresetHint")}>
+          <select disabled={running} value={contextOptions.generation_preset ?? ""}
+            onChange={(e) => setContextOptions((o) => ({ ...o, generation_preset: (e.target.value || null) as GenerationPreset | null }))}>
+            <option value="">{t("pr.followDefault")} · {t(`pr.${projectPreset}`)}</option>
+            <option value="general">{t("pr.general")}</option>
+            <option value="compact">{t("pr.compact")}</option>
+          </select>
+        </Field>
 
         <ContextControls chapterId={(currentChapter || newId).trim()} options={contextOptions}
           onChange={setContextOptions} revision={promptRevision + sourceRevision} catalog={catalog} setCatalog={setCatalog} disabled={running} />

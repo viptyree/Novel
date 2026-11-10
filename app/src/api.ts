@@ -17,10 +17,18 @@ export interface Settings {
   llm_provider?: LlmProvider;
 }
 
+export type GenerationPreset = "general" | "compact";
 export interface TaskPrompt { system: string; user_template: string; }
-export interface PromptSettings extends TaskPrompt { consistency: TaskPrompt; memory: TaskPrompt; }
+export interface PromptSettings extends TaskPrompt {
+  generation_preset: GenerationPreset;
+  compact_generation: TaskPrompt;
+  general_material_guidance: boolean;
+  compact_material_guidance: boolean;
+  consistency: TaskPrompt; memory: TaskPrompt;
+}
 export interface PromptPair { system: string; user: string; }
 export interface ContextOptions {
+  generation_preset?: GenerationPreset | null;
   automatic: boolean; characters: string[]; chapters: string[]; events: string[];
   recent_chapters: number; max_events: number; input_budget: number;
   include_outline: boolean; outline_excerpt: string;
@@ -60,8 +68,8 @@ export const api = {
     invoke<ChapterDetails>("save_chapter_title", { projectRoot, chapterId, title, expectedPath }),
   readChapter: (chapterId: string) =>
     invoke<string>("read_chapter", { chapterId }),
-  saveChapter: (chapterId: string, content: string) =>
-    invoke<void>("save_chapter", { chapterId, content }),
+  saveChapter: (chapterId: string, content: string, expected?: string) =>
+    invoke<void>("save_chapter", { chapterId, content, expected: expected ?? null }),
 
   readReport: (chapterId: string, kind: ReportKind) =>
     invoke<string>("read_report", { chapterId, kind }),
@@ -70,19 +78,19 @@ export const api = {
 
   readMemoryFile: (rel: string) =>
     invoke<string>("read_memory_file", { rel }),
-  saveMemoryFile: (rel: string, content: string) =>
-    invoke<void>("save_memory_file", { rel, content }),
+  saveMemoryFile: (rel: string, content: string, expected?: string) =>
+    invoke<void>("save_memory_file", { rel, content, expected: expected ?? null }),
 
   getSettings: () => invoke<Settings>("get_settings"),
-  saveSettings: (settings: Settings) =>
-    invoke<void>("save_settings", { settings }),
+  saveSettings: (settings: Settings, expected?: Settings) =>
+    invoke<void>("save_settings", { settings, expected: expected ?? null }),
 
   contextCatalog: (chapterId: string) => invoke<ContextCatalog>("context_catalog", { chapterId }),
   getSourceSettings: () => invoke<SourceSettings>("get_source_settings"),
-  saveSourceSettings: (settings: SourceSettings) => invoke<void>("save_source_settings", { settings }),
+  saveSourceSettings: (settings: SourceSettings, expected?: string) => invoke<void>("save_source_settings", { settings, expected: expected ?? null }),
   getPromptSettings: () => invoke<PromptSettings>("get_prompt_settings"),
   defaultPromptSettings: () => invoke<PromptSettings>("default_prompt_settings"),
-  savePromptSettings: (settings: PromptSettings) => invoke<void>("save_prompt_settings", { settings }),
+  savePromptSettings: (settings: PromptSettings, expected?: PromptSettings) => invoke<void>("save_prompt_settings", { settings, expected: expected ?? null }),
   previewPrompt: (chapterId: string, idea: string, targetWords: number, useContext: boolean, pov: string, narrative: string, contextOptions: ContextOptions) =>
     invoke<PromptPreview>("preview_generation_prompt", { chapterId, idea, targetWords, useContext, pov, narrative, contextOptions }),
 

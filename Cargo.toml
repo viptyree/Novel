@@ -1,0 +1,4 @@
+[workspace]
+members = ["crates/novel-core", "crates/novel-cli", "app/src-tauri"]
+default-members = ["crates/novel-core", "crates/novel-cli"]
+resolver = "2"

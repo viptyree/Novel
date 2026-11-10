@@ -241,3 +241,17 @@ A：正文默认在 **项目目录** 下的 `chapters/`，也可在设置页指�
 ---
 
 写得开心。🖋️ 记住：模型是你的副驾，方向盘一直在你手里。
+
+
+## 终端与 SSH 操作
+
+在 Windows PowerShell、CMD 或 SSH 中输入 `novel`，即可进入中文交互菜单。菜单覆盖项目、章节、记忆、提示词、上下文、设置、报告和任务；GUI 与 CLI 共享同一 Rust 引擎和文件。
+
+```sh
+novel
+novel chapter generate ch001 --idea-file idea.txt --detach
+novel job list
+novel job wait JOB_ID
+```
+
+模型任务在独立 worker 中执行；退出菜单、Ctrl+C 停止等待或 SSH 断连后仍继续。重连后进入任务中心查看。Esc 返回上一级，Home 返回主页；菜单末尾也有对应入口，主页按 Esc 不退出。内置编辑器用 Ctrl+S/F2 保存、Ctrl+F 搜索、Ctrl+A/E 移到行首尾；有未保存内容时，返回或回主页会提示保存、放弃或继续编辑。也可选择外部终端编辑器。低能力终端用 `novel --plain`。生成时同项目修改会被阻止，其他入口的保存冲突会提示重新加载。Windows 安装时默认提供当前用户 PATH 选项。

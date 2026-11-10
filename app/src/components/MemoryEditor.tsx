@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import { useUi } from "../i18n";
 import { Banner, Spinner } from "./common";
@@ -68,6 +68,7 @@ export default function MemoryEditor() {
   const { t, lang } = useUi();
   const [active, setActive] = useState<FileDef>(FILES[0]);
   const [content, setContent] = useState("");
+  const savedContent = useRef("");
   const [dirty, setDirty] = useState(false);
   const [busy, setBusy] = useState(false);
   useProjectActivity("memory", dirty, busy);
@@ -77,6 +78,7 @@ export default function MemoryEditor() {
     try {
       const text = await api.readMemoryFile(def.rel);
       setContent(text);
+      savedContent.current = text;
       setDirty(false);
       setBanner(null);
     } catch (e) {
@@ -93,7 +95,8 @@ export default function MemoryEditor() {
   async function onSave() {
     setBusy(true);
     try {
-      await api.saveMemoryFile(active.rel, content);
+      await api.saveMemoryFile(active.rel, content, savedContent.current);
+      savedContent.current = content;
       setDirty(false);
       setBanner({ kind: "ok", msg: `${active.label[lang]} ${t("me.savedSuffix")}` });
     } catch (e) {

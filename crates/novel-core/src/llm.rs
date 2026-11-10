@@ -163,7 +163,7 @@ fn clip_tail(s: &str, n: usize) -> String {
 /// 在 PATH 中解析可执行文件，返回 (路径, 是否为批处理脚本)。
 /// 批处理脚本(.cmd/.bat)无法被 CreateProcess 直接执行，需经 `cmd /C` 调用。
 #[cfg(windows)]
-fn resolve_executable(name: &str) -> Option<(std::path::PathBuf, bool)> {
+pub(crate) fn resolve_executable(name: &str) -> Option<(std::path::PathBuf, bool)> {
     use std::path::Path;
     // 用户直接给了存在的路径
     let direct = Path::new(name);
@@ -193,7 +193,7 @@ fn resolve_executable(name: &str) -> Option<(std::path::PathBuf, bool)> {
 
 /// 非 Windows：交给 PATH 解析（Command::new 会查找 PATH），不存在批处理垫片问题。
 #[cfg(not(windows))]
-fn resolve_executable(name: &str) -> Option<(std::path::PathBuf, bool)> {
+pub(crate) fn resolve_executable(name: &str) -> Option<(std::path::PathBuf, bool)> {
     use std::path::Path;
     let direct = Path::new(name);
     if direct.is_file() {

@@ -241,3 +241,17 @@ A: Text defaults to `chapters/` under the **project directory**, or the chapter 
 ---
 
 Happy writing. 🖋️ Remember: the model is your co-pilot — your hands are always on the wheel.
+
+
+## Terminal and SSH
+
+Run `novel` in PowerShell, CMD or an SSH terminal for the Chinese interactive menu. Projects, chapters, memory, prompts, context, settings, reports and jobs use the same Rust core and files as the desktop.
+
+```sh
+novel
+novel chapter generate ch001 --idea-file idea.txt --detach
+novel job list
+novel job wait JOB_ID
+```
+
+Model tasks run in independent workers and continue after leaving the menu, stopping a wait with Ctrl+C, or disconnecting SSH. Reconnect and open the job center to inspect results. Esc goes back one level, Home returns to the homepage, and Esc on the homepage does not exit. Menus also offer Back and Home entries. The built-in editor supports Ctrl+S/F2 to save, Ctrl+F to search, and Ctrl+A/E for line start/end. Leaving with unsaved edits offers Save, Discard, or Continue; failed saves keep the editor open. External terminal editors are supported. Use `novel --plain` for numbered menus. Concurrent project writes are blocked while a task runs; conflicting edits require reloading. The Windows installer offers a user PATH option.

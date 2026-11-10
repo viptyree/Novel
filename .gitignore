@@ -103,3 +103,10 @@ piple重建.md
 .memory-backups/
 author-notes.md
 memory/state_metadata.json
+
+# Rust workspace and CLI packaging
+/target/
+app/src-tauri/binaries/
+.novel-operation.lock
+.novel-commit.lock
+.novel-settings.lock

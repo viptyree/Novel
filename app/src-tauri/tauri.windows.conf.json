@@ -1,0 +1,17 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/novel"],
+    "resources": [
+      "templates/config.yaml",
+      "templates/memory/*",
+      "templates/outlines/*",
+      "installer/cli-path.ps1"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "installerHooks": "installer/cli.nsh"
+      }
+    }
+  }
+}

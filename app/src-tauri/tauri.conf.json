@@ -4,9 +4,9 @@
   "version": "0.3.0",
   "identifier": "com.yuxin.novel-pipeline",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "node ../scripts/build-cli.mjs --debug && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build && node ../scripts/build-cli.mjs",
     "frontendDist": "../dist"
   },
   "app": {
@@ -25,7 +25,9 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

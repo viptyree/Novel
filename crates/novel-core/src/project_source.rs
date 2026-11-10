@@ -157,9 +157,7 @@ pub fn write(root: &Path, path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let temp = path.with_extension("md.tmp");
-    fs::write(&temp, text).map_err(|e| e.to_string())?;
-    fs::rename(temp, path).map_err(|e| e.to_string())
+    atomic_write(path, text.as_bytes())
 }
 
 #[cfg(test)]

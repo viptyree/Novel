@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, LlmProvider, Settings } from "../api";
 import { useT } from "../i18n";
 import { Banner, Field, Spinner } from "./common";
@@ -14,6 +14,7 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
     disable_thinking: true,
     llm_provider: "api",
   });
+  const originalSettings = useRef<Settings | undefined>(undefined);
   const [sourceDirectory, setSourceDirectory] = useState("");
   const [busy, setBusy] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -29,6 +30,7 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
     setLoading(true); setLoaded(false);
     Promise.all([api.getSettings(), api.getSourceSettings()]).then(([next, source]) => {
       if (cancelled) return;
+      originalSettings.current = next;
       setSettings(next); setSourceDirectory(source.directory); setSavedSource(source.directory); setLoaded(true);
     }).catch((e) => { if (!cancelled) setBanner({ kind: "err", msg: String(e) }); })
       .finally(() => { if (!cancelled) setLoading(false); });
@@ -50,8 +52,10 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
       && !window.confirm(t("pj.sourceConfirm"))) return;
     setBusy(true);
     try {
-      await api.saveSettings(settings);
-      if (sourceDirectory.trim() !== savedSource) await api.saveSourceSettings({ directory: sourceDirectory.trim() });
+      await api.saveSettings(settings, originalSettings.current);
+      const merged = await api.getSettings();
+      setSettings(merged); originalSettings.current = merged;
+      if (sourceDirectory.trim() !== savedSource) await api.saveSourceSettings({ directory: sourceDirectory.trim() }, savedSource);
       await onSaved();
       setSavedSource(sourceDirectory.trim());
       setDirty(false);
