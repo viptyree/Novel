@@ -13,6 +13,8 @@ export function estimateTokens(text: string): number {
   }
   return cjk + Math.ceil(ascii / 4) + Math.ceil(other / 2);
 }
+const sourceVariables: Record<string, string> = { character: "角色档案", summary: "章节摘要", event: "历史事件", timeline: "时间线", rules: "故事圣经", outline: "全书大纲", foreshadowing: "伏笔档案", style: "文风参考" };
+
 export function ContextReport({ preview }: { preview: PromptPreview }) {
   const t = useT();
   const total = estimateTokens(preview.prompts.system) + estimateTokens(preview.prompts.user);
@@ -24,8 +26,8 @@ export function ContextReport({ preview }: { preview: PromptPreview }) {
     {preview.stats.warnings.filter((warning) => !warning.startsWith("输入超过预算") || total > preview.stats.budget).map((warning, i) => <div className="memory-note" key={i}>{warning}</div>)}
     <details><summary>{t("cx.sources")}</summary>
       <div className="context-source-list">{preview.stats.sources.map((source, i) => <div className="context-source" key={i}>
-        <strong>{t(source.included ? "cx.included" : "cx.excluded")} · {source.id}</strong>
-        <div>{source.reason}</div><small className="muted">{source.file}</small>
+        <strong>{t(source.included ? "cx.included" : "cx.excluded")} · {source.kind === "chapter" ? `{{参考正文:${source.id}}}` : `{{${sourceVariables[source.kind] ?? source.kind}}}`} · {source.id}</strong>
+        <div>{source.reason}</div><small className="muted">{source.file} · {source.characters} {t("wb.words")}</small>
       </div>)}</div>
     </details>
   </div>;
@@ -82,7 +84,9 @@ export default function ContextControls({ chapterId, options, onChange, revision
     </div> : null}
     <label className="check-row"><input type="checkbox" disabled={disabled} checked={options.include_outline}
       onChange={(e) => onChange({ ...options, include_outline: e.target.checked })} />{t("cx.outline")}</label>
-    {options.include_outline ? <Field label={t("cx.outlineExcerpt")} hint={t("cx.outlineHint")}>
+    {options.include_outline ? <label className="check-row"><input type="checkbox" disabled={disabled} checked={options.outline_full}
+      onChange={(e) => onChange({ ...options, outline_full: e.target.checked })} />{t("cx.outlineFull")}</label> : null}
+    {options.include_outline && !options.outline_full ? <Field label={t("cx.outlineExcerpt")} hint={t("cx.outlineHint")}>
       <textarea disabled={disabled} value={options.outline_excerpt} onChange={(e) => onChange({ ...options, outline_excerpt: e.target.value })} />
     </Field> : null}
     {catalog?.notes ? <details><summary>{t("cx.notes")}</summary><pre className="author-notes">{catalog.notes}</pre></details> : null}

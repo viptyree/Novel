@@ -33,11 +33,11 @@ export interface ContextOptions {
   generation_preset?: GenerationPreset | null;
   automatic: boolean; characters: string[]; chapters: string[]; events: string[];
   recent_chapters: number; max_events: number; input_budget: number;
-  include_outline: boolean; outline_excerpt: string;
+  include_outline: boolean; outline_excerpt: string; outline_full: boolean;
 }
 export const defaultContextOptions: ContextOptions = {
   automatic: true, characters: [], chapters: [], events: [], recent_chapters: 2,
-  max_events: 6, input_budget: 8000, include_outline: false, outline_excerpt: "",
+  max_events: 6, input_budget: 8000, include_outline: false, outline_excerpt: "", outline_full: false,
 };
 export interface ContextSource { kind: string; id: string; file: string; reason: string; included: boolean; characters: number; }
 export interface ContextStats { characters: number; estimated_tokens: number; budget: number; over_budget: boolean; sources: ContextSource[]; warnings: string[]; }

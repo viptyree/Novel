@@ -80,7 +80,7 @@ jobs:
           mkdir -p cli-package
           cp README.md README_EN.md LICENSE cli-package/
           mkdir -p cli-package/docs
-          cp docs/CLI.md cli-package/docs/
+          cp docs/CLI.md docs/提示词设置使用说明.md docs/RELEASE-0.4.0.md cli-package/docs/
           if [[ "${{ matrix.platform }}" == "windows-latest" ]]; then
             cp target/${{ matrix.target }}/release/novel.exe cli-package/
             7z a novel-cli-${{ matrix.target }}.zip ./cli-package/*

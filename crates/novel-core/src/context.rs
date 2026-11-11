@@ -15,6 +15,7 @@ pub struct Options {
     pub input_budget: usize,
     pub include_outline: bool,
     pub outline_excerpt: String,
+    pub outline_full: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -29,6 +30,7 @@ impl Default for Options {
             input_budget: 8000,
             include_outline: false,
             outline_excerpt: String::new(),
+            outline_full: false,
         }
     }
 }
@@ -409,37 +411,15 @@ pub fn build(
             ));
         }
     }
-    // 显式参考章若无摘要，读取所选正文全文；不默认发送整章正文。
-    let chapter_files = project_source::chapters(root)?;
+    // A summary variable never falls back to chapter prose. Prose requires an explicit template reference.
     for cid in &opts.chapters {
         let n = project_source::number(cid).ok_or("参考章号无效")?;
-        if n >= target {
-            return Err(format!("参考章 {} 必须早于目标章", cid));
-        }
-        if summary_chapters.contains(cid) {
-            continue;
-        }
-        if let Some(file) = chapter_files.get(&n) {
-            let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
-            record(
-                &mut stats,
-                "chapter",
-                cid,
-                file,
-                "手动参考章无摘要，携带正文全文",
-                true,
-                &text,
-            );
-            summary_text.push((n, format!("参考正文 [{}]：\n{}", cid, text)));
-            summary_chapters.insert(cid.clone());
-        } else {
-            stats
-                .warnings
-                .push(format!("参考章 {} 无摘要也无正文", cid));
+        if n >= target { return Err(format!("参考章 {cid} 必须早于目标章")); }
+        if !summary_chapters.contains(cid) {
+            stats.warnings.push(format!("参考章 {cid} 没有摘要；如需正文，请在模板中使用 {{{{参考正文:{cid}}}}}"));
         }
     }
     summary_text.sort_by_key(|(n, _)| *n);
-    let mut compact_history = summary_text.clone();
     sections.insert(
         "Recent Chapter Summaries".into(),
         summary_text
@@ -449,20 +429,11 @@ pub fn build(
             .join("\n\n"),
     );
 
-    // 同一 event_id 只组装一次；timeline 只提供缺失的时间与独立记录。
+    // Events and timeline retain independent file provenance.
     let mut merged = BTreeMap::new();
-    for e in all_events.iter().chain(all_timeline.iter()) {
+    for e in &all_events {
         let eid = string(e, "event_id");
-        if eid.is_empty() {
-            continue;
-        }
-        let current = merged.entry(eid).or_insert_with(|| e.clone());
-        if string(current, "time_order").is_empty() {
-            let time = string(e, "time");
-            if !time.is_empty() {
-                current["time_order"] = Value::String(time);
-            }
-        }
+        if !eid.is_empty() { merged.entry(eid).or_insert_with(|| e.clone()); }
     }
     // 去掉人物名后再计算历史相关性，避免主角姓名使全书每条事件都匹配。
     let mut query = idea.to_string();
@@ -484,10 +455,7 @@ pub fn build(
     let auto_ids: HashSet<_> = if opts.automatic {
         ranked
             .iter()
-            .filter(|(eid, score, _)| {
-                let e = &merged[eid];
-                *score >= 2 && !summary_chapters.contains(&string(e, "chapter_id"))
-            })
+            .filter(|(_, score, _)| *score >= 2)
             .take(opts.max_events)
             .map(|(eid, _, _)| eid.clone())
             .collect()
@@ -503,15 +471,13 @@ pub fn build(
         }
         let mut include = before(e, target) && (explicit || auto_ids.contains(eid));
         let desc = string(e, "description");
-        if include && !descriptions.insert(compact(&desc)) {
+        if include && !descriptions.insert((chapter(e), compact(&desc))) {
             include = false;
         }
         let reason = if !before(e, target) {
             "本章或后续记录，已排除"
         } else if explicit {
             "手动选择历史事件"
-        } else if summary_chapters.contains(&string(e, "chapter_id")) {
-            "已用该章摘要，不重复列事件"
         } else if include {
             "与本章关键词相关"
         } else {
@@ -538,7 +504,6 @@ pub fn build(
                 },
                 desc
             );
-            compact_history.push((chapter(e).unwrap_or(0), text.clone()));
             event_text.push(text);
         }
     }
@@ -548,19 +513,16 @@ pub fn build(
         }
     }
     sections.insert("Recent Events".into(), event_text.join("\n"));
-    // Work with whole source records so reference chapter paragraphs are never altered.
-    // Only identical facts from the same chapter are deduplicated; repeated later actions remain.
-    compact_history.sort_by_key(|(n, _)| *n);
-    let mut history_seen = HashSet::new();
-    let compact_history = compact_history.into_iter().filter_map(|(n, text)| {
-        if text.starts_with("参考正文 [") { return Some(text); }
-        let fact = text.split_once("] ").map(|(_, body)| body).unwrap_or(&text).trim().to_string();
-        if history_seen.insert((n, fact)) { Some(text) } else { None }
-    }).collect::<Vec<_>>().join("\n\n");
-    if opts.generation_preset == Some(GenerationPreset::Compact) {
-        sections.insert("Compact Prelude".into(), compact_history);
+    let mut timeline_text = Vec::new();
+    for (index, entry) in all_timeline.iter().enumerate() {
+        let include = before(entry, target);
+        let text = serde_json::to_string(entry).map_err(|e| e.to_string())?;
+        record(&mut stats, "timeline", &format!("{}:{index}", string(entry, "event_id")),
+            &memory.join("timeline.jsonl"), "仅携带目标章之前的时间线记录", include, &text);
+        if include { timeline_text.push((chapter(entry).unwrap_or(0), text)); }
     }
-    sections.insert("Timeline".into(), String::new());
+    timeline_text.sort_by_key(|(n, _)| *n);
+    sections.insert("Timeline".into(), timeline_text.into_iter().map(|(_, text)| text).collect::<Vec<_>>().join("\n"));
 
     let bible = from_yaml(&state_dir.join("story_bible.yaml"))?;
     let mut rules = vec![];
@@ -637,7 +599,9 @@ pub fn build(
         "",
     );
     sections.insert("Active Foreshadowing".into(), clues.join("\n"));
-    let outline = if opts.include_outline {
+    let outline = if opts.include_outline && opts.outline_full {
+        fs::read_to_string(root.join("outlines/book_outline.yaml")).map_err(|e| format!("全书大纲读取失败: {e}"))?
+    } else if opts.include_outline {
         opts.outline_excerpt.trim().to_string()
     } else {
         String::new()
@@ -655,7 +619,7 @@ pub fn build(
         if outline.is_empty() {
             "默认不携带全书大纲，只接受作者明确提供的选段"
         } else {
-            "作者手动大纲选段，仅作方向参考"
+            if opts.outline_full { "作者明确选择完整大纲" } else { "作者手动大纲选段，仅作方向参考" }
         },
         !outline.is_empty(),
         &outline,
@@ -687,7 +651,7 @@ pub fn build(
     sections.insert("Style References".into(), style_text.join("\n\n"));
     let conflict_sources = sections
         .iter()
-        .filter(|(k, _)| !matches!(k.as_str(), "Style References" | "Compact Prelude"))
+        .filter(|(k, _)| k.as_str() != "Style References")
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
     Ok(Memory {
@@ -772,7 +736,7 @@ mod tests {
         .unwrap();
     }
     #[test]
-    fn events_merge_time_and_exclude_current_future_regardless_of_file_order() {
+    fn events_and_timeline_keep_separate_sources_and_exclude_current_future() {
         let root = root();
         rows(
             &root,
@@ -797,10 +761,11 @@ mod tests {
         let mem = build(&root, "ch005", "铜钥匙", true, &opts).unwrap();
         let text = &mem.sections["Recent Events"];
         assert_eq!(text.matches("铜钥匙来自旧宅").count(), 1);
-        assert!(text.contains("三日前"));
+        assert!(!text.contains("三日前"));
+        assert!(mem.sections["Timeline"].contains("三日前"));
         assert!(!text.contains("开启天门"));
         assert!(!text.contains("本章结局"));
-        assert!(mem.sections["Timeline"].is_empty());
+        assert!(!mem.sections["Timeline"].is_empty());
         let invalid = Options {
             events: vec!["future".into()],
             ..opts
@@ -809,7 +774,7 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn summaries_are_chronological_and_suppress_duplicate_chapter_events() {
+    fn summaries_are_chronological_and_do_not_suppress_event_sources() {
         let root = root();
         rows(
             &root,
@@ -831,7 +796,7 @@ mod tests {
         let text = &mem.sections["Recent Chapter Summaries"];
         assert!(!text.contains("找到铜钥匙"));
         assert!(text.find("修复").unwrap() < text.find("归还").unwrap());
-        assert!(mem.sections["Recent Events"].is_empty());
+        assert!(mem.sections["Recent Events"].contains("归还铜钥匙"));
         fs::remove_dir_all(root).unwrap();
     }
     #[test]

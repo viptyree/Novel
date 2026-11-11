@@ -1193,9 +1193,9 @@ impl App {
         }
         if index == 2 {
             let variables = match category {
-                PromptCategory::General | PromptCategory::Compact | PromptCategory::Benchmark => "{{人物状态}}、{{前情}}、{{相关设定与伏笔}}、{{文风参考}}、{{事件骨架}}（必需）、{{目标字数}}、{{叙事要求}}、{{章节ID}}",
-                PromptCategory::Consistency => "{{章节ID}}、{{章节正文}}（必需）、{{事件骨架}}、{{人物状态}}、{{世界观规则}}、{{伏笔}}、{{近期事件}}、{{时间线}}",
-                PromptCategory::Memory => "{{章节ID}}、{{章节正文}}（必需）、{{人物状态}}、{{伏笔}}。请保留默认 JSON 输出结构及字段名，程序依赖这些字段更新记忆",
+                PromptCategory::General | PromptCategory::Compact | PromptCategory::Benchmark => "参考正文：{{参考正文:ch003}}（只能引用较早章）；旧变量不再支持。{{角色档案}}、{{章节摘要}}、{{历史事件}}、{{时间线}}、{{故事圣经}}、{{全书大纲}}、{{伏笔档案}}、{{文风参考}}、{{事件骨架}}（必需）、{{目标字数}}、{{叙事视角}}、{{叙事要求}}、{{章节ID}}",
+                PromptCategory::Consistency => "{{章节ID}}、{{章节正文}}（必需）、{{事件骨架}}、{{角色档案}}、{{故事圣经}}、{{伏笔档案}}、{{章节摘要}}、{{历史事件}}、{{时间线}}",
+                PromptCategory::Memory => "{{章节ID}}、{{章节正文}}（必需）、{{角色档案}}、{{伏笔档案}}。请保留默认 JSON 输出结构及字段名，程序依赖这些字段更新记忆",
             };
             return self.view("模板与变量说明", &format!("系统提示词\n\n{}\n\n任务模板\n\n{}\n\n可用变量：{}\n\n直接编辑文字和换行即可；保存后持续生效，不改变项目默认方案。未引用的资料不会发送。", task.system, task.user_template, variables));
         }

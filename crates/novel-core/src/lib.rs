@@ -385,14 +385,26 @@ fn build_memory_sections(project_dir: &Path, use_context: bool) -> MemorySection
 }
 
 const DEFAULT_SYSTEM_PROMPT: &str = "你是一名中文长篇小说写作助手，只输出小说正文。";
-const DEFAULT_USER_TEMPLATE: &str = "【章初人物状态】
-{{人物状态}}
+const DEFAULT_USER_TEMPLATE: &str = "【角色档案】
+{{角色档案}}
 
-【前情】
-{{前情}}
+【章节摘要】
+{{章节摘要}}
 
-【相关设定与伏笔】
-{{相关设定与伏笔}}
+【历史事件】
+{{历史事件}}
+
+【时间线】
+{{时间线}}
+
+【故事圣经】
+{{故事圣经}}
+
+【全书大纲】
+{{全书大纲}}
+
+【伏笔档案】
+{{伏笔档案}}
 
 【文风参考】
 {{文风参考}}
@@ -405,6 +417,7 @@ const DEFAULT_USER_TEMPLATE: &str = "【章初人物状态】
 人物与前情为章初资料，本章可依事件骨架取得新物品、获知信息、展示新能力或改变状态。
 未在本章骨架安排的未来规划不得提前展开。
 目标约 {{目标字数}} 中文字。
+{{叙事视角}}
 {{叙事要求}}
 遵循作者事件骨架的顺序，不改变动作执行者。
 不重复前文已发生的事件，不提前进入下一章主要剧情。
@@ -425,11 +438,17 @@ fn default_benchmark_material_guidance() -> bool { false }
 fn default_compact_generation() -> TaskPrompt {
     TaskPrompt {
         system: DEFAULT_SYSTEM_PROMPT.into(),
-        user_template: "【人物状态】
-{{人物状态}}
+        user_template: "【角色档案】
+{{角色档案}}
 
-【前情】
-{{前情}}
+【章节摘要】
+{{章节摘要}}
+
+【历史事件】
+{{历史事件}}
+
+【时间线】
+{{时间线}}
 
 【事件骨架】
 {{事件骨架}}
@@ -440,8 +459,15 @@ fn default_compact_generation() -> TaskPrompt {
 人物状态与前情描述章初情况，本章变化以事件骨架为准。
 不提前展开骨架以外的未来剧情。
 目标约 {{目标字数}} 中文字。
+{{叙事视角}}
 {{叙事要求}}
-{{相关设定与伏笔}}
+{{故事圣经}}
+
+【全书大纲】
+{{全书大纲}}
+
+【伏笔档案】
+{{伏笔档案}}
 {{文风参考}}".into(),
     }
 }
@@ -474,12 +500,12 @@ pub struct TaskPrompt {
     pub user_template: String,
 }
 
-fn legacy_task_template(template: &str) -> String {
+fn task_template(template: &str) -> String {
     let mut text = template.to_string();
     for (old, new) in [
         ("chapter_id", "章节ID"), ("chapter_text", "章节正文"), ("chapter_idea", "事件骨架"),
-        ("characters_text", "人物状态"), ("world_rules_text", "世界观规则"),
-        ("foreshadowing_text", "伏笔"), ("events_text", "近期事件"), ("timeline_text", "时间线"),
+        ("characters_text", "角色档案"), ("world_rules_text", "故事圣经"),
+        ("foreshadowing_text", "伏笔档案"), ("events_text", "历史事件"), ("timeline_text", "时间线"),
     ] {
         text = text.replace(&format!("{{{}}}", old), &format!("{{{{{}}}}}", new));
     }
@@ -489,14 +515,14 @@ fn legacy_task_template(template: &str) -> String {
 fn default_consistency_prompt() -> TaskPrompt {
     TaskPrompt {
         system: "你是一位专业的小说编辑，专注于连续性审查。请用中文输出报告。".into(),
-        user_template: legacy_task_template(CONSISTENCY_CHECK_PROMPT),
+        user_template: format!("{}\n\n## 章节摘要\n{{{{章节摘要}}}}", task_template(CONSISTENCY_CHECK_PROMPT)),
     }
 }
 
 fn default_memory_prompt() -> TaskPrompt {
     TaskPrompt {
         system: "你只输出严格合法的JSON，不输出任何其他文本。".into(),
-        user_template: legacy_task_template(EXTRACTION_PROMPT_TEMPLATE),
+        user_template: task_template(EXTRACTION_PROMPT_TEMPLATE),
     }
 }
 
@@ -537,9 +563,19 @@ fn load_prompt_settings(project_dir: &Path) -> Result<PromptSettings, String> {
     }
 }
 
-const PROMPT_VARIABLES: &[&str] = &[
-    "人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID", "章节正文", "世界观规则", "伏笔", "近期事件", "时间线",
+pub const GENERATION_VARIABLES: &[&str] = &[
+    "角色档案", "故事圣经", "全书大纲", "伏笔档案", "章节摘要", "历史事件", "时间线", "文风参考",
+    "事件骨架", "目标字数", "叙事视角", "叙事要求", "章节ID",
 ];
+const PROMPT_VARIABLES: &[&str] = &[
+    "角色档案", "故事圣经", "全书大纲", "伏笔档案", "章节摘要", "历史事件", "时间线", "文风参考",
+    "事件骨架", "目标字数", "叙事视角", "叙事要求", "章节ID", "章节正文",
+];
+fn reference_chapter(name: &str) -> Option<&str> {
+    let id = name.strip_prefix("参考正文:")?;
+    let digits = id.strip_prefix("ch")?;
+    if digits.len() >= 3 && digits.bytes().all(|b| b.is_ascii_digit()) { Some(id) } else { None }
+}
 
 // 单次扫描模板；资料里的 {{...}} 不会被再次替换或当作模板执行。
 fn render_prompt_template(template: &str, values: &[(String, String)]) -> Result<String, String> {
@@ -550,7 +586,7 @@ fn render_prompt_template(template: &str, values: &[(String, String)]) -> Result
         let tail = &rest[start + 2..];
         let end = tail.find("}}").ok_or("模板变量缺少 }}")?;
         let name = tail[..end].trim();
-        if !PROMPT_VARIABLES.contains(&name) {
+        if !PROMPT_VARIABLES.contains(&name) && reference_chapter(name).is_none() {
             return Err(format!("未知提示词变量: {{{{{}}}}}", name));
         }
         output.push_str(values.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()).unwrap_or(""));
@@ -573,7 +609,7 @@ fn validate_prompt_variables(template: &str, allowed: &[&str], required: Option<
     let mut has_required = false;
     for caps in re.captures_iter(template) {
         let name = caps[1].trim();
-        if !allowed.contains(&name) { return Err(format!("当前分类不支持变量: {}", name)); }
+        if !allowed.contains(&name) && !(allowed == GENERATION_VARIABLES && reference_chapter(name).is_some()) { return Err(format!("当前分类不支持变量: {}", name)); }
         has_required |= Some(name) == required;
     }
     if let Some(required) = required {
@@ -584,16 +620,16 @@ fn validate_prompt_variables(template: &str, allowed: &[&str], required: Option<
 
 fn validate_prompt_settings(settings: &PromptSettings) -> Result<(), String> {
     validate_task_prompt(&settings.system, &settings.user_template,
-        &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], "事件骨架")?;
+        GENERATION_VARIABLES, "事件骨架")?;
     validate_task_prompt(&settings.compact_generation.system, &settings.compact_generation.user_template,
-        &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], "事件骨架")?;
+        GENERATION_VARIABLES, "事件骨架")?;
     // Benchmark is an author-owned draft: each field can be saved independently.
     validate_prompt_variables(&settings.benchmark_generation.user_template,
-        &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], None)?;
+        GENERATION_VARIABLES, None)?;
     validate_task_prompt(&settings.consistency.system, &settings.consistency.user_template,
-        &["章节ID", "章节正文", "事件骨架", "人物状态", "世界观规则", "伏笔", "近期事件", "时间线"], "章节正文")?;
+        &["章节ID", "章节正文", "事件骨架", "角色档案", "故事圣经", "伏笔档案", "历史事件", "时间线", "章节摘要"], "章节正文")?;
     validate_task_prompt(&settings.memory.system, &settings.memory.user_template,
-        &["章节ID", "章节正文", "人物状态", "伏笔"], "章节正文")
+        &["章节ID", "章节正文", "角色档案", "伏笔档案"], "章节正文")
 }
 
 fn assemble_task_prompt(task: &TaskPrompt, values: &[(String, String)], settings: &Settings) -> Result<PromptPair, String> {
@@ -640,30 +676,45 @@ fn assemble_generation_prompt(
     };
     if preset == GenerationPreset::Benchmark {
         validate_task_prompt(system, user_template,
-            &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], "事件骨架")
+            GENERATION_VARIABLES, "事件骨架")
             .map_err(|error| format!("对标方案尚未配置完整：{error}；请先在提示词设置中完成对标模板"))?;
     }
     let get = |k: &str| mem.sections.get(k).cloned().unwrap_or_default();
-    let combine = |parts: Vec<(&str, String)>| parts.into_iter().filter(|(_, s)| !s.trim().is_empty())
-        .map(|(name, text)| format!("{}：\n{}", name, text)).collect::<Vec<_>>().join("\n\n");
-    let values = vec![
-        ("人物状态".into(), get("Characters")),
-        ("前情".into(), if preset == GenerationPreset::Compact {
-            get("Compact Prelude")
-        } else { combine(vec![("直接前情与参考章", get("Recent Chapter Summaries")), ("相关历史事件（已合并时间信息）", get("Recent Events"))]) }),
-        ("相关设定与伏笔".into(), combine(vec![("故事规则", get("Story Bible")), ("作者大纲选段（方向参考，不提前展开）", get("Book Outline")), ("已埋下的相关线索", get("Active Foreshadowing"))])),
-        ("文风参考".into(), if preset == GenerationPreset::Compact && !get("Style References").trim().is_empty() {
-            format!("文风参考（仅参考表达）：\n{}", get("Style References"))
-        } else { get("Style References") }),
+    let mut values = vec![
+        ("角色档案".into(), get("Characters")),
+        ("章节摘要".into(), get("Recent Chapter Summaries")),
+        ("历史事件".into(), get("Recent Events")),
+        ("时间线".into(), get("Timeline")),
+        ("故事圣经".into(), get("Story Bible")),
+        ("全书大纲".into(), get("Book Outline")),
+        ("伏笔档案".into(), get("Active Foreshadowing")),
+        ("文风参考".into(), get("Style References")),
         ("事件骨架".into(), normalize_idea(idea)),
         ("目标字数".into(), target_words.to_string()),
+        ("叙事视角".into(), get("Narrative POV")),
         ("叙事要求".into(), form_block.into()),
         ("章节ID".into(), chapter_id.into()),
     ];
+    let mut reference_sources = Vec::new();
+    for caps in regex::Regex::new(r"\{\{([^{}]+)\}\}").unwrap().captures_iter(user_template) {
+        let name = caps[1].trim();
+        if let Some(id) = reference_chapter(name) {
+            let number = project_source::number(id).ok_or("参考章号无效")?;
+            if number >= project_source::number(chapter_id).ok_or("目标章号无效")? {
+                return Err(format!("参考正文 {id} 必须早于目标章"));
+            }
+            let files = project_source::chapters(project_dir)?;
+            let file = files.get(&number).ok_or_else(|| format!("参考正文 {id} 不存在"))?;
+            let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
+            reference_sources.push(context::Source { kind: "chapter".into(), id: id.into(), file: file.display().to_string(),
+                reason: "模板明确引用该章正文".into(), included: true, characters: text.chars().count() });
+            values.push((name.into(), text));
+        }
+    }
     let user = render_generation_template(user_template, &values)?;
     let variables: std::collections::HashSet<String> = regex::Regex::new(r"\{\{([^{}]+)\}\}").unwrap()
         .captures_iter(user_template).map(|c| c[1].trim().to_string()).collect();
-    let uses_state = values.iter().any(|(key, value)| ["人物状态", "前情", "相关设定与伏笔"].contains(&key.as_str()) && variables.contains(key) && !value.trim().is_empty());
+    let uses_state = values.iter().any(|(key, value)| ["角色档案", "章节摘要", "历史事件", "时间线", "故事圣经", "全书大纲", "伏笔档案"].contains(&key.as_str()) && variables.contains(key) && !value.trim().is_empty());
     let user = if uses_state && material_guidance {
         format!("【资料使用原则】\n以下人物状态与前情描述本章开始前的情况；本章可按事件骨架取得物品、获知信息或改变状态。章初的‘尚未’不等于本章禁止发生；骨架未安排的未来事项不得自行展开。\n\n{}", user)
     } else { user };
@@ -672,12 +723,15 @@ fn assemble_generation_prompt(
     let source = serde_json::to_string(&(project_dir, chapter_id, idea, target_words,
         settings.llm_provider.as_deref(), settings.disable_thinking, preset, material_guidance, &prompts)).map_err(|e| e.to_string())?;
     let mut stats = mem.stats.clone();
+    stats.sources.extend(reference_sources);
     for source in &mut stats.sources {
         let key = match source.kind.as_str() {
-            "character" => "人物状态", "summary" | "event" | "chapter" => "前情",
-            "style" => "文风参考", _ => "相关设定与伏笔",
+            "character" => "角色档案".to_string(), "summary" => "章节摘要".into(), "event" => "历史事件".into(),
+            "timeline" => "时间线".into(), "chapter" => format!("参考正文:{}", source.id),
+            "rules" => "故事圣经".into(), "outline" => "全书大纲".into(), "foreshadowing" => "伏笔档案".into(),
+            "style" => "文风参考".into(), _ => String::new(),
         };
-        if source.included && !variables.contains(key) {
+        if source.included && !variables.contains(&key) {
             source.included = false;
             source.reason = "模板未引用此类资料，未发送".into();
         }
@@ -696,23 +750,19 @@ fn prepare_generation(
 ) -> Result<(PromptPreview, MemorySections), String> {
     let mut effective_options = options.clone();
     effective_options.generation_preset = Some(options.generation_preset.unwrap_or(load_prompt_settings(root)?.generation_preset));
-    let mem = context::build(root, id, idea, use_context, &effective_options)?;
-    let form = if !use_context || mem.stats.warnings.iter().any(|w| w.contains("快照")) {
-        build_form_block(pov, &narrative.split(|c| c == ',' || c == '，' || c == '\n').map(str::to_string).collect::<Vec<_>>())
-    } else { generation_form(root, pov, narrative) };
+    let mut mem = context::build(root, id, idea, use_context, &effective_options)?;
+    let (default_pov, default_directives) = if !use_context || mem.stats.warnings.iter().any(|w| w.contains("快照")) {
+        (String::new(), Vec::new())
+    } else { read_narrative_defaults(root) };
+    let effective_pov = if pov.trim().is_empty() { default_pov } else { pov.trim().to_string() };
+    let directives = if narrative.trim().is_empty() { default_directives } else {
+        narrative.split(|c| c == ',' || c == '，' || c == '\n').map(str::to_string).collect()
+    };
+    mem.sections.insert("Narrative POV".into(), build_form_block(&effective_pov, &[]));
+    let form = build_form_block("", &directives);
     let mut preview = assemble_generation_prompt(root, settings, id, idea, target_words, &mem, &form, effective_options.generation_preset)?;
     preview.source = serde_json::to_string(&(&preview.source, options, project_source::chapter_path(root, id)?)).map_err(|e| e.to_string())?;
     Ok((preview, mem))
-}
-
-fn generation_form(project_dir: &Path, pov: &str, narrative: &str) -> String {
-    let (default_pov, default_directives) = read_narrative_defaults(project_dir);
-    let effective_pov = if pov.trim().is_empty() { default_pov } else { pov.trim().to_string() };
-    let directives = if narrative.trim().is_empty() { default_directives } else {
-        narrative.split(|c| c == ',' || c == '，' || c == '\n')
-            .map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect()
-    };
-    build_form_block(&effective_pov, &directives)
 }
 
 pub fn choose_generation_prompt(preview: PromptPreview, custom: Option<PromptOverride>) -> Result<PromptPair, String> {
@@ -1238,8 +1288,8 @@ fn do_check_consistency(app: &Context, chapter_id: &str) -> CommandResult {
     let characters_text = section("Characters");
     let world_rules_text = section("Story Bible");
     let foreshadowing_text = section("Active Foreshadowing");
-    let events_text = format!("{}\n{}", section("Recent Chapter Summaries"), section("Recent Events"));
-    let timeline_text = String::new();
+    let events_text = section("Recent Events");
+    let timeline_text = section("Timeline");
 
     let templates = match load_prompt_settings(&config.project_dir) {
         Ok(t) => t,
@@ -1247,9 +1297,10 @@ fn do_check_consistency(app: &Context, chapter_id: &str) -> CommandResult {
     };
     let prompts = match assemble_task_prompt(&templates.consistency, &[
         ("章节ID".into(), chapter_id.into()), ("章节正文".into(), chapter_text.clone()),
-        ("事件骨架".into(), chapter_idea), ("人物状态".into(), characters_text),
-        ("世界观规则".into(), world_rules_text), ("伏笔".into(), foreshadowing_text),
-        ("近期事件".into(), events_text), ("时间线".into(), timeline_text),
+        ("事件骨架".into(), chapter_idea), ("角色档案".into(), characters_text),
+        ("故事圣经".into(), world_rules_text), ("伏笔档案".into(), foreshadowing_text),
+        ("历史事件".into(), events_text), ("时间线".into(), timeline_text),
+        ("章节摘要".into(), section("Recent Chapter Summaries")),
     ], &settings) {
         Ok(p) => p,
         Err(e) => return CommandResult { success: false, log: e },
@@ -2284,7 +2335,7 @@ fn do_update_memory(app: &Context, chapter_id: &str) -> CommandResult {
     };
     let prompts = match assemble_task_prompt(&templates.memory, &[
         ("章节ID".into(), chapter_id.into()), ("章节正文".into(), chapter_text),
-        ("人物状态".into(), characters_text), ("伏笔".into(), foreshadowing_text),
+        ("角色档案".into(), characters_text), ("伏笔档案".into(), foreshadowing_text),
     ], &settings) {
         Ok(p) => p,
         Err(e) => return CommandResult { success: false, log: e },
@@ -2595,8 +2646,8 @@ mod tests {
         assert!(build_form_block("", &[]).is_empty());
         assert!(!build_form_block("limited:陆青霜", &[]).contains("王二"));
         assert_eq!(normalize_idea("## 【事件骨架】\n\n1. 取书。"), "1. 取书。");
-        let output = render_generation_template("【空区块】\n{{人物状态}}\n\n【事件骨架】\n{{事件骨架}}", &[
-            ("人物状态".into(), String::new()), ("事件骨架".into(), "1. 取书。".into()),
+        let output = render_generation_template("【空区块】\n{{角色档案}}\n\n【事件骨架】\n{{事件骨架}}", &[
+            ("角色档案".into(), String::new()), ("事件骨架".into(), "1. 取书。".into()),
         ]).unwrap();
         assert!(!output.contains("空区块")); assert!(output.contains("1. 取书。"));
     }
@@ -2633,7 +2684,7 @@ mod tests {
         let settings = Settings { disable_thinking: Some(false), ..Settings::default() };
         let chapter = "陆青霜发现写着 {{章节ID}} 的纸条。";
         let values = vec![("章节ID".into(), "ch005".into()), ("章节正文".into(), chapter.into()),
-            ("人物状态".into(), "人物资料".into()), ("伏笔".into(), "伏笔资料".into())];
+            ("角色档案".into(), "人物资料".into()), ("伏笔档案".into(), "伏笔资料".into())];
         let memory = assemble_task_prompt(&default_memory_prompt(), &values, &settings).unwrap();
         assert!(memory.user.contains(chapter));
         assert!(memory.user.contains("\"chapter_id\": \"ch005\""));
@@ -2738,6 +2789,47 @@ mod tests {
     }
 
     #[test]
+    fn removed_variable_names_are_rejected_without_migration() {
+        for name in ["人物状态", "前情", "相关设定与伏笔", "世界观规则", "近期事件", "伏笔"] {
+            let mut template = PromptSettings::default();
+            template.user_template = format!("{{{{{name}}}}} {{{{事件骨架}}}}");
+            let error = validate_prompt_settings(&template).unwrap_err();
+            assert!(error.contains(name));
+        }
+    }
+
+    #[test]
+    fn each_generation_variable_reads_only_its_own_file() {
+        let dir = temp_project("one_file_per_variable");
+        fs::create_dir_all(dir.join("outlines")).unwrap();
+        fs::write(dir.join("memory/characters.yaml"), "characters:\n- name: CHAR_MARK\n  role: 主角\n").unwrap();
+        fs::write(dir.join("memory/story_bible.yaml"), "world_rules: [BIBLE_MARK]\n").unwrap();
+        fs::write(dir.join("memory/foreshadowing.yaml"), "active:\n- id: clue\n  description: CLUE_MARK\n  introduced_in: ch001\n").unwrap();
+        fs::write(dir.join("memory/chapter_summaries.jsonl"), r#"{"chapter_id":"ch001","chapter_summary":"SUMMARY_MARK"}"#).unwrap();
+        fs::write(dir.join("memory/events.jsonl"), r#"{"chapter_id":"ch001","event_id":"event","description":"EVENT_MARK"}"#).unwrap();
+        fs::write(dir.join("memory/timeline.jsonl"), r#"{"chapter_id":"ch001","event_id":"event","description":"TIME_MARK","time":"yesterday"}"#).unwrap();
+        fs::write(dir.join("memory/style_bank.jsonl"), r#"{"source_chapter":"ch001","text":"STYLE_MARK"}"#).unwrap();
+        fs::write(dir.join("outlines/book_outline.yaml"), "plan: OUTLINE_MARK\n").unwrap();
+        let cases = [("角色档案", "CHAR_MARK", "character"), ("故事圣经", "BIBLE_MARK", "rules"),
+            ("伏笔档案", "CLUE_MARK", "foreshadowing"), ("章节摘要", "SUMMARY_MARK", "summary"),
+            ("历史事件", "EVENT_MARK", "event"), ("时间线", "TIME_MARK", "timeline"),
+            ("文风参考", "STYLE_MARK", "style"), ("全书大纲", "OUTLINE_MARK", "outline")];
+        let opts = context::Options { events: vec!["event".into()], include_outline: true, outline_full: true, ..Default::default() };
+        for (name, marker, kind) in cases {
+            let mut template = PromptSettings::default();
+            template.user_template = format!("{{{{{name}}}}}\n{{{{事件骨架}}}}\n{{{{叙事视角}}}}\n{{{{叙事要求}}}}");
+            fs::write(dir.join(".prompt-settings.json"), serde_json::to_vec(&template).unwrap()).unwrap();
+            let preview = prepare_generation(&dir, &Settings::default(), "ch003", "IDEA_MARK", 1000, true, "objective", "DIRECTIVE_MARK", &opts).unwrap().0;
+            assert!(preview.prompts.user.contains(marker), "{name}: {}", preview.prompts.user);
+            for (_, other, _) in cases { if other != marker { assert!(!preview.prompts.user.contains(other), "{name} leaked {other}"); } }
+            assert!(preview.prompts.user.contains("客观旁观视角"));
+            assert!(preview.prompts.user.contains("DIRECTIVE_MARK"));
+            for source in preview.stats.sources.iter().filter(|s| s.included) { assert_eq!(source.kind, kind); }
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn preview_and_override_preserve_exact_messages() {
         let dir = temp_project("prompt_exact");
         let settings = Settings::default();
@@ -2810,7 +2902,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_preset_uses_four_sections_and_project_default_can_be_overridden() {
+    fn compact_preset_uses_independent_sources_and_project_default_can_be_overridden() {
         let dir = temp_project("compact_generation");
         fs::write(dir.join("memory/characters.yaml"), "characters:\n  - name: 林川\n    role: 主角\n    identity: 学徒\n    current_status: 疲惫但警惕\n    personality: 性格字段样例\n    speaking_style: 言语字段样例\n    knows: [导师在山谷]\n    secrets: [藏着钥匙]\n    relationships: [导师是师父]\n    constraints: [尚未掌握御剑]\n").unwrap();
         fs::write(dir.join("memory/story_bible.yaml"), "world_rules: [飞行消耗灵力]\n").unwrap();
@@ -2827,7 +2919,7 @@ mod tests {
         let preview = |opts: &context::Options| prepare_generation(&dir, &settings, "ch003", "1. 林川进入山谷。", 1000, true, "", "", opts).unwrap().0;
         let compact = preview(&opts);
         let headings: Vec<_> = compact.prompts.user.lines().filter(|line| line.starts_with('【') && line.ends_with('】')).collect();
-        assert_eq!(headings, ["【人物状态】", "【前情】", "【事件骨架】", "【写作要求】"]);
+        assert_eq!(headings, ["【角色档案】", "【章节摘要】", "【历史事件】", "【事件骨架】", "【写作要求】", "【全书大纲】", "【伏笔档案】"]);
         for fact in ["学徒", "疲惫但警惕", "导师在山谷", "藏着钥匙", "导师是师父", "尚未掌握御剑", "飞行消耗灵力", "山风掠过衣角。", "钥匙上刻着残纹", "仅展开山谷训练"] {
             assert!(compact.prompts.user.contains(fact), "missing {fact}");
         }
@@ -2839,13 +2931,14 @@ mod tests {
         assert!(!compact.prompts.user.contains("性格字段样例"));
         assert!(!compact.prompts.user.contains("言语字段样例"));
         assert!(!compact.prompts.user.contains("直接前情与参考章"));
-        assert!(compact.prompts.user.find("林川取得铜钥匙").unwrap() < compact.prompts.user.find("林川跟随导师赶路").unwrap());
+        assert!(compact.prompts.user.split("【章节摘要】").nth(1).unwrap().split("【历史事件】").next().unwrap().contains("林川跟随导师赶路"));
+        assert!(compact.prompts.user.split("【历史事件】").nth(1).unwrap().split("【事件骨架】").next().unwrap().contains("林川取得铜钥匙"));
         let general_opts = context::Options { generation_preset: Some(GenerationPreset::General), ..opts.clone() };
         let general = preview(&general_opts);
         assert!(general.prompts.user.contains("性格字段样例"));
         assert!(general.prompts.user.contains("言语字段样例"));
         assert!(general.prompts.user.starts_with("【资料使用原则】"));
-        assert!(general.prompts.user.contains("【相关设定与伏笔】"));
+        assert!(general.prompts.user.contains("【故事圣经】"));
         assert_ne!(compact.source, general.source);
         assert!(choose_generation_prompt(general, Some(PromptOverride { prompts: compact.prompts.clone(), source: compact.source.clone() })).is_err());
         assert_eq!(choose_generation_prompt(compact.clone(), None).unwrap(), compact.prompts);
@@ -2860,7 +2953,7 @@ mod tests {
     }
 
     #[test]
-    fn compact_history_preserves_pinned_prose_and_deduplicates_same_chapter_only() {
+    fn explicit_reference_preserves_prose_and_does_not_replace_summaries() {
         let dir = temp_project("compact_history");
         fs::create_dir_all(dir.join("正文")).unwrap();
         let prose = "第一段。\n\n同样的话。\n同样的话。\n- [ch999] 正文内的列表。";
@@ -2868,12 +2961,29 @@ mod tests {
         fs::write(dir.join("memory/chapter_summaries.jsonl"), r#"{"chapter_id":"ch002","chapter_summary":"林川走入山谷"}"#).unwrap();
         fs::write(dir.join("memory/events.jsonl"), r#"{"chapter_id":"ch002","event_id":"same","description":"林川走入山谷"}
 {"chapter_id":"ch003","event_id":"later","description":"林川走入山谷"}"#).unwrap();
+        let mut template = PromptSettings::default();
+        template.compact_generation.user_template = "【参考正文】\n{{参考正文:ch001}}\n【章节摘要】\n{{章节摘要}}\n【历史事件】\n{{历史事件}}\n【事件骨架】\n{{事件骨架}}".into();
+        fs::write(dir.join(".prompt-settings.json"), serde_json::to_string(&template).unwrap()).unwrap();
         let options = context::Options { generation_preset: Some(GenerationPreset::Compact),
             chapters: vec!["ch001".into()], events: vec!["same".into(), "later".into()], ..context::Options::default() };
         let (preview, _) = prepare_generation(&dir, &Settings::default(), "ch004", "林川离开", 1000, true, "", "", &options).unwrap();
         assert!(preview.prompts.user.contains(prose));
-        assert_eq!(preview.prompts.user.matches("林川走入山谷").count(), 2);
+        assert_eq!(preview.prompts.user.matches("林川走入山谷").count(), 3);
         assert!(preview.prompts.user.find(prose).unwrap() < preview.prompts.user.find("林川走入山谷").unwrap());
+        assert!(preview.stats.sources.iter().any(|s| s.kind == "chapter" && s.included && s.id == "ch001"));
+        // Selecting a chapter with no summary must never substitute its prose.
+        template.compact_generation.user_template = "{{章节摘要}}\n{{事件骨架}}".into();
+        fs::write(dir.join(".prompt-settings.json"), serde_json::to_vec(&template).unwrap()).unwrap();
+        let without_prose = prepare_generation(&dir, &Settings::default(), "ch004", "离开", 1000, true, "", "", &options).unwrap().0;
+        assert!(!without_prose.prompts.user.contains(prose));
+        for id in ["ch004", "ch005", "ch009"] {
+            template.compact_generation.user_template = format!("{{{{参考正文:{id}}}}}\n{{{{事件骨架}}}}");
+            fs::write(dir.join(".prompt-settings.json"), serde_json::to_vec(&template).unwrap()).unwrap();
+            assert!(prepare_generation(&dir, &Settings::default(), "ch004", "离开", 1000, true, "", "", &options).is_err());
+        }
+        template.compact_generation.user_template = "{{参考正文:ch002}}\n{{事件骨架}}".into();
+        fs::write(dir.join(".prompt-settings.json"), serde_json::to_vec(&template).unwrap()).unwrap();
+        assert!(prepare_generation(&dir, &Settings::default(), "ch004", "离开", 1000, true, "", "", &options).err().unwrap().contains("不存在"));
         fs::remove_dir_all(dir).unwrap();
     }
 
