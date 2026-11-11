@@ -96,6 +96,9 @@ export const api = {
   previewPrompt: (chapterId: string, idea: string, targetWords: number, useContext: boolean, pov: string, narrative: string, contextOptions: ContextOptions) =>
     invoke<PromptPreview>("preview_generation_prompt", { chapterId, idea, targetWords, useContext, pov, narrative, contextOptions }),
 
+  generateChapterManual: (chapterId: string, prompts: PromptPair, overwrite: boolean, inputBudget: number) =>
+    invoke<CommandResult>("generate_chapter_manual", { chapterId, prompts, overwrite, inputBudget }),
+
   generateChapter: (
     chapterId: string,
     idea: string,

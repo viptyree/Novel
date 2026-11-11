@@ -359,6 +359,7 @@ fn text_result(text: String) -> Result<Value> {
 pub fn main() {
     let mut cli = Cli::parse();
     cli.no_color |= std::env::var_os("NO_COLOR").is_some();
+    tui::set_no_color(cli.no_color);
     let _ = ctrlc::set_handler(|| {
         STOP_WAIT.store(true, Ordering::Relaxed);
     });

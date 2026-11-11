@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { marked } from "marked";
 import { api, ChapterDetails, ReportKind } from "../api";
 import { useT } from "../i18n";
@@ -21,38 +21,36 @@ export default function Reports({ chapters, chapterDetails, currentChapter, setC
   const t = useT();
   const [kind, setKind] = useState<ReportKind>("consistency");
   const [html, setHtml] = useState("");
+  const request = useRef(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const [empty, setEmpty] = useState(false);
 
   async function load() {
-    if (!currentChapter) {
-      setHtml("");
-      setEmpty(false);
-      return;
-    }
+    const revision = ++request.current;
+    setError(""); setHtml(""); setEmpty(false);
+    if (!currentChapter) { setLoading(false); return; }
+    setLoading(true);
     try {
       const md = await api.readReport(currentChapter, kind);
-      if (!md.trim()) {
-        setHtml("");
-        setEmpty(true);
-        return;
-      }
-      setEmpty(false);
-      setHtml(await marked.parse(md));
-    } catch {
-      setHtml("");
-      setEmpty(true);
-    }
+      const rendered = await marked.parse(md);
+      if (revision !== request.current) return;
+      setHtml(rendered); setEmpty(!md.trim());
+    } catch (e) {
+      if (revision === request.current) setError(String(e));
+    } finally { if (revision === request.current) setLoading(false); }
   }
 
   useEffect(() => {
-    load();
+    void load();
+    return () => { request.current += 1; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentChapter, kind]);
 
   return (
     <div className="reports">
       <div className="reports-bar">
-        <select value={currentChapter} onChange={(e) => setCurrentChapter(e.target.value)}>
+        <select aria-label={t("rp.selectChapter")} value={currentChapter} onChange={(e) => setCurrentChapter(e.target.value)}>
           <option value="">{t("rp.selectChapter")}</option>
           {chapters.map((c) => (
             <option key={c} value={c}>
@@ -78,6 +76,10 @@ export default function Reports({ chapters, chapterDetails, currentChapter, setC
 
       {!currentChapter ? (
         <Banner kind="info">{t("rp.pickChapter")}</Banner>
+      ) : loading ? (
+        <Banner kind="info">{t("ui.loading")}</Banner>
+      ) : error ? (
+        <Banner kind="err">{t("ui.reportError")} {error}</Banner>
       ) : empty ? (
         <Banner kind="info">{t("rp.empty")}</Banner>
       ) : (

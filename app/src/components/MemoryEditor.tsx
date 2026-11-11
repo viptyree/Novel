@@ -9,13 +9,13 @@ type Bi = { zh: string; en: string };
 interface FileDef {
   rel: string;
   label: Bi;
-  group: "core" | "auto";
+  group: "author" | "core" | "auto";
   note?: Bi;
 }
 
 const FILES: FileDef[] = [
   {
-    rel: "author-notes.md", label: { zh: "作者备注（不发送模型）", en: "Author notes (excluded)" }, group: "core",
+    rel: "author-notes.md", label: { zh: "作者备注（不发送模型）", en: "Author notes (excluded)" }, group: "author",
     note: { zh: "版本冲突、待确认事项和未来规划保存在这里，不自动加入提示词。", en: "Keep version conflicts, questions and plans here. These notes are not sent to the model." },
   },
   {
@@ -51,7 +51,7 @@ const FILES: FileDef[] = [
   {
     rel: "config.yaml",
     label: { zh: "流水线配置", en: "Pipeline Config" },
-    group: "core",
+    group: "author",
     note: { zh: "程序读取的配置，不直接进入提示词；已有设置可用时可以留空", en: "Program configuration, not model input. May remain empty when app settings suffice" },
   },
   {
@@ -106,8 +106,9 @@ export default function MemoryEditor() {
     }
   }
 
-  const groups: { key: "core" | "auto"; label: string }[] = [
-    { key: "core", label: t("me.groupCore") },
+  const groups: { key: "author" | "core" | "auto"; label: string }[] = [
+    { key: "author", label: t("ui.author") },
+    { key: "core", label: t("ui.core") },
     { key: "auto", label: t("me.groupAuto") },
   ];
 
@@ -119,6 +120,7 @@ export default function MemoryEditor() {
             <div className="memory-group-title">{g.label}</div>
             {FILES.filter((f) => f.group === g.key).map((f) => (
               <button
+                disabled={busy}
                 key={f.rel}
                 className={f.rel === active.rel ? "memory-item active" : "memory-item"}
                 onClick={() => {
@@ -150,6 +152,8 @@ export default function MemoryEditor() {
         </div>
         {active.note ? <div className="memory-note">{active.note[lang]}</div> : null}
         <textarea
+          aria-label={active.label[lang]}
+          disabled={busy}
           className="code"
           spellCheck={false}
           value={content}

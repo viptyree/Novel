@@ -24,43 +24,14 @@ use std::{
 };
 use unicode_width::UnicodeWidthChar;
 
+static NO_COLOR_UI: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub fn set_no_color(value: bool) { NO_COLOR_UI.store(value, std::sync::atomic::Ordering::Relaxed); }
 static PLAIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 type Screen = Terminal<CrosstermBackend<io::Stdout>>;
-struct Session {
-    terminal: Screen,
-}
-fn restore() {
-    let _ = terminal::disable_raw_mode();
-    let _ = execute!(
-        io::stdout(),
-        DisableBracketedPaste,
-        LeaveAlternateScreen,
-        crossterm::cursor::Show
-    );
-}
-impl Session {
-    fn new() -> Result<Self> {
-        if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            return Err("交互界面需要 TTY；SSH 请分配终端，或使用标准命令".into());
-        }
-        terminal::enable_raw_mode().map_err(|e| e.to_string())?;
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, EnableBracketedPaste) {
-            restore();
-            return Err(e.to_string());
-        }
-        let terminal = Terminal::new(CrosstermBackend::new(io::stdout())).map_err(|e| {
-            restore();
-            e.to_string()
-        })?;
-        Ok(Self { terminal })
-    }
-}
-impl Drop for Session {
-    fn drop(&mut self) {
-        restore();
-    }
-}
+mod session;
+mod ui;
+use session::{Session, restore};
 fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
@@ -80,6 +51,7 @@ fn next_event() -> Result<Event> {
 enum Nav {
     Back,
     Home,
+    Module(workspace::Module),
 }
 #[derive(Debug, PartialEq, Eq)]
 enum Choice<T> {
@@ -134,6 +106,8 @@ fn save_template_field(ctx: &Context, category: PromptCategory, system: bool, ex
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Page {
     Home,
+    Project(String),
+    Advanced(workspace::Advanced),
     Projects,
     RecentProjects,
     Chapters(ChapterPurpose),
@@ -144,6 +118,7 @@ enum Page {
     PromptCategories,
     PromptTemplate(PromptCategory),
     PromptPreview(String),
+    ManualGenerate(String),
     Settings,
     Report(String),
     Jobs,
@@ -154,6 +129,8 @@ impl Page {
     fn label(&self) -> String {
         match self {
             Self::Home => "主页".into(),
+            Self::Project(_) => "项目操作".into(),
+            Self::Advanced(kind) => kind.label().into(),
             Self::Projects => "项目管理".into(),
             Self::RecentProjects => "最近项目".into(),
             Self::Chapters(p) => match p {
@@ -164,6 +141,7 @@ impl Page {
             }
             .into(),
             Self::Chapter(id) => format!("章节 {id}"),
+            Self::ManualGenerate(id) => format!("{id} 手动完整提示词工作台"),
             Self::Memories => "记忆与大纲".into(),
             Self::Memory(file) => file.clone(),
             Self::Prompts => "提示词与上下文".into(),
@@ -188,6 +166,7 @@ impl Page {
 struct Frame {
     page: Page,
     list: ListState,
+    view: workspace::ViewState,
 }
 struct Navigation {
     frames: Vec<Frame>,
@@ -198,6 +177,7 @@ impl Navigation {
             frames: vec![Frame {
                 page: Page::Home,
                 list: ListState::default().with_selected(Some(0)),
+                view: workspace::ViewState::default(),
             }],
         }
     }
@@ -205,6 +185,7 @@ impl Navigation {
         self.frames.push(Frame {
             page,
             list: ListState::default().with_selected(Some(0)),
+                view: workspace::ViewState::default(),
         });
     }
     fn go(&mut self, nav: Nav) {
@@ -213,6 +194,7 @@ impl Navigation {
                 self.frames.pop();
             }
             Nav::Home => self.frames.truncate(1),
+            Nav::Module(module) => { self.frames.truncate(1); if module != workspace::Module::Home { self.push(module.page()); } },
             _ => {}
         }
     }
@@ -254,7 +236,7 @@ fn short_path(path: &str, width: u16) -> String {
 }
 fn regions(area: Rect) -> [Rect; 3] {
     let chunks = Layout::vertical([
-        Constraint::Length(2),
+        Constraint::Length(3),
         Constraint::Min(1),
         Constraint::Length(3),
     ])
@@ -315,16 +297,8 @@ fn menu_choice(
         session
             .terminal
             .draw(|f| {
-                let [header, body, footer] = regions(f.area());
-                f.render_widget(
-                    Paragraph::new(short_path(path, header.width)).wrap(Wrap { trim: false }),
-                    header,
-                );
-                let highlight = if no_color {
-                    Style::default().add_modifier(ratatui::style::Modifier::REVERSED)
-                } else {
-                    Style::default().fg(Color::Cyan)
-                };
+                let [_, body, footer] = ui::chrome(f, path, no_color);
+                let highlight = ui::selected(no_color);
                 f.render_stateful_widget(
                     List::new(
                         labels
@@ -332,7 +306,7 @@ fn menu_choice(
                             .enumerate()
                             .map(|(i, s)| ListItem::new(format!("{}. {s}", i + 1))),
                     )
-                    .block(Block::default().borders(Borders::ALL))
+                    .block(ui::block("选择", true, no_color))
                     .highlight_style(highlight)
                     .highlight_symbol("› "),
                     body,
@@ -456,16 +430,15 @@ fn viewer_at(path: &str, text: &str, plain: bool, saved_offset: &mut u16) -> Res
         session
             .terminal
             .draw(|f| {
-                let [header, body, footer] = regions(f.area());
-                f.render_widget(Paragraph::new(short_path(path, header.width)), header);
+                let [_, body, footer] = ui::chrome(f, path, NO_COLOR_UI.load(std::sync::atomic::Ordering::Relaxed));
                 f.render_widget(
                     Paragraph::new(lines.join("\n"))
                         .scroll((offset, 0))
-                        .block(Block::default().borders(Borders::ALL)),
+                        .block(ui::block("正文 / 内容", true, NO_COLOR_UI.load(std::sync::atomic::Ordering::Relaxed))),
                     body,
                 );
                 f.render_widget(
-                    Paragraph::new("↑↓ / PgUp PgDn 滚动\n[Esc 返回上一级]\n[Home / H 返回主页]"),
+                    Paragraph::new("↑↓ / PgUp PgDn 滚动\n[Esc 返回上一级]\n[Home/H 主页 · F1 导航]"),
                     footer,
                 );
             })
@@ -475,6 +448,12 @@ fn viewer_at(path: &str, text: &str, plain: bool, saved_offset: &mut u16) -> Res
                 continue;
             }
             match k.code {
+                KeyCode::F(1) => {
+                    drop(session);
+                    let nav = workspace::pick_module(false, NO_COLOR_UI.load(std::sync::atomic::Ordering::Relaxed))?;
+                    if nav != Nav::Back { return Ok(nav); }
+                    session = Session::new()?;
+                }
                 KeyCode::Esc | KeyCode::Enter => return Ok(Nav::Back),
                 KeyCode::Home | KeyCode::Char('h' | 'H') => return Ok(Nav::Home),
                 KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -586,13 +565,35 @@ fn preset_label(preset: core::GenerationPreset) -> &'static str {
     }
 }
 
+#[derive(Clone)]
+struct ManualDraft {
+    prompts: core::PromptPair,
+    overwrite: bool,
+    input_budget: usize,
+}
+impl Default for ManualDraft {
+    fn default() -> Self {
+        Self { prompts: core::PromptPair { system: String::new(), user: String::new() }, overwrite: false, input_budget: 100000 }
+    }
+}
+impl ManualDraft {
+    fn action(&self, id: &str) -> Result<crate::jobs::Action> {
+        core::preview_manual_prompt(self.prompts.clone(), self.input_budget)?;
+        Ok(crate::jobs::Action::GenerateManual { id: core::canonical_chapter_id(id)?,
+            prompts: self.prompts.clone(), overwrite: self.overwrite, input_budget: self.input_budget })
+    }
+}
+
 struct App {
     ctx: Context,
     plain: bool,
     no_color: bool,
     nav: Navigation,
     keys: Vec<String>,
+    last_chapter: Option<(std::path::PathBuf, String)>,
+    all_jobs: bool,
     drafts: std::collections::HashMap<(std::path::PathBuf, String), GenerationDraft>,
+    manual_drafts: std::collections::HashMap<(std::path::PathBuf, String), ManualDraft>,
     reading: std::collections::HashMap<(std::path::PathBuf, String), u16>,
 }
 enum Effect {
@@ -600,6 +601,8 @@ enum Effect {
     Push(Page),
     Home,
     Exit,
+    Replace(Page),
+    Module(workspace::Module),
 }
 macro_rules! answer {
     ($value:expr) => {
@@ -610,6 +613,8 @@ macro_rules! answer {
         }
     };
 }
+mod workspace;
+fn navigation_effect(nav: Nav) -> Effect { match nav { Nav::Home => Effect::Home, Nav::Module(module) => Effect::Module(module), Nav::Back => Effect::Stay } }
 fn words(values: &[&str]) -> Vec<String> {
     values.iter().map(|s| s.to_string()).collect()
 }
@@ -624,13 +629,7 @@ impl App {
         confirm(&self.nav.path(), label, self.plain, self.no_color)
     }
     fn view(&self, label: &str, text: &str) -> Result<Effect> {
-        Ok(
-            if viewer(&self.path(label), text, self.plain)? == Nav::Home {
-                Effect::Home
-            } else {
-                Effect::Stay
-            },
-        )
+        Ok(navigation_effect(viewer(&self.path(label), text, self.plain)?))
     }
     fn execute(&mut self, args: Vec<String>) -> Result<Effect> {
         let reading = if args.first().map(String::as_str) == Some("chapter")
@@ -668,13 +667,15 @@ impl App {
         if let Some(chapter) = reading {
             let title = self.path(&format!("{chapter} · 阅读正文"));
             let offset = self.reading.entry((self.ctx.project_dir.clone(), format!("{chapter}:阅读正文"))).or_default();
-            return Ok(if viewer_at(&title, &text, self.plain, offset)? == Nav::Home { Effect::Home } else { Effect::Stay });
+            return Ok(navigation_effect(viewer_at(&title, &text, self.plain, offset)?));
         }
         self.view("操作结果", &text)
     }
+    #[cfg(test)]
     fn items(&mut self) -> Result<Vec<String>> {
         self.keys.clear();
         let labels: Vec<String> = match self.nav.page().clone() {
+            Page::Project(_) | Page::Advanced(_) => return Err("此页面由工作区绘制".into()),
             Page::Home => words(&[
                 "项目管理",
                 "章节工作台",
@@ -731,6 +732,7 @@ impl App {
                 "生成三个章名",
                 "保存章名",
                 "重置章节",
+                "手动完整提示词工作台",
             ]),
             Page::Memories => core::EDITABLE_FILES.iter().map(|s| s.to_string()).collect(),
             Page::Memory(_) => words(&["查看", "内置编辑器", "外部编辑器", "从文件导入"]),
@@ -792,6 +794,15 @@ impl App {
             Page::Job(_) => unreachable!("任务页使用实时视图"),
             Page::PromptPreview(_) => words(&["查看完整提示词", "编辑系统提示词（保存即采用）",
                 "编辑章节提示词（保存即采用）", "采用当前预览用于本章", "恢复自动组装"]),
+            Page::ManualGenerate(id) => {
+                let draft = self.manual_drafts.entry((self.ctx.project_dir.clone(), id)).or_default();
+                vec![format!("编辑完整章节提示词（{} 字）", draft.prompts.user.chars().count()),
+                    format!("编辑系统提示词（可留空，{} 字）", draft.prompts.system.chars().count()),
+                    "查看完整提示词".into(),
+                    format!("覆盖已有正文：{}", if draft.overwrite { "是" } else { "否" }),
+                    format!("输入预算：{} tokens", draft.input_budget),
+                    "提交后台生成".into(), "清空本章手动草稿".into()]
+            }
             Page::Generate { id, preview } => {
                 let default_preset = core::get_prompt_settings(self.ctx.clone())?.generation_preset;
                 let d = self
@@ -827,6 +838,7 @@ impl App {
         let page = self.nav.page().clone();
         let mut args: Vec<String>;
         match page {
+            Page::Project(_) | Page::Advanced(_) => return Err("无效的旧版菜单操作".into()),
             Page::Home => {
                 return Ok(match index {
                     0 => Effect::Push(Page::Projects),
@@ -904,6 +916,7 @@ impl App {
                     1 | 2 => return self.edit_chapter(&id, index == 2),
                     3 => words(&["chapter", "new", &id]),
                     4 => return Ok(Effect::Push(Page::Generate { id, preview: false })),
+                    10 => return Ok(Effect::Push(Page::ManualGenerate(id))),
                     5 => words(&["chapter", "check", &id, "--detach"]),
                     6 => words(&["memory", "update", &id, "--detach"]),
                     7 => {
@@ -1060,6 +1073,7 @@ impl App {
             }
             Page::Job(_) => unreachable!("任务页使用实时视图"),
             Page::Generate { id, preview } => return self.generate_action(&id, preview, index),
+            Page::ManualGenerate(id) => return self.manual_generate_action(&id, index),
         }
         self.execute(args)
     }
@@ -1075,6 +1089,7 @@ impl App {
                 JobAction::Back => return Ok(Nav::Back),
                 JobAction::Home => return Ok(Nav::Home),
                 JobAction::Refresh => continue,
+                JobAction::Modules => { let nav = workspace::pick_module(self.plain, self.no_color)?; if nav == Nav::Back { continue; } return Ok(nav); },
                 _ => {}
             }
             let result = (|| -> Result<Effect> {
@@ -1110,13 +1125,14 @@ impl App {
                             else { core::read_report(ctx, chapter.into(), report.ok_or("此任务没有报告")?.into())? };
                         let title = self.path(&format!("{} · {chapter} · {}", status.project.file_name().unwrap_or_default().to_string_lossy(), choice.label()));
                         let offset = self.reading.entry((status.project.clone(), format!("{chapter}:{}", choice.label()))).or_default();
-                        Ok(if viewer_at(&title, &text, self.plain, offset)? == Nav::Home { Effect::Home } else { Effect::Stay })
+                        Ok(navigation_effect(viewer_at(&title, &text, self.plain, offset)?))
                     }
                     _ => Ok(Effect::Stay),
                 }
             })();
             match result {
                 Ok(Effect::Home) => return Ok(Nav::Home),
+                Ok(Effect::Module(module)) => return Ok(Nav::Module(module)),
                 Ok(_) => {},
                 Err(error) => {
                     if viewer(&self.path("操作未完成"), &error, self.plain)? == Nav::Home { return Ok(Nav::Home); }
@@ -1334,6 +1350,50 @@ impl App {
         let output = crate::jobs::submit(self.ctx.clone(), crate::jobs::Action::Generate(generation), true)?;
         Ok(Effect::Push(Page::Job(output["id"].as_str().ok_or("任务缺少 ID")?.to_string())))
     }
+    fn manual_generate_action(&mut self, id: &str, index: usize) -> Result<Effect> {
+        let key = (self.ctx.project_dir.clone(), id.to_string());
+        let draft = self.manual_drafts.entry(key.clone()).or_default().clone();
+        match index {
+            0 | 1 => {
+                let system = index == 1;
+                let initial = if system { &draft.prompts.system } else { &draft.prompts.user };
+                let title = self.path(if system { "手动系统提示词（可留空）" } else { "完整章节提示词（原文发送）" });
+                let current = self.manual_drafts.get_mut(&key).unwrap();
+                let nav = edit_with_save(&self.ctx.data_dir, &title, initial, false, self.plain, |text| {
+                    if system { current.prompts.system = text.into(); } else { current.prompts.user = text.into(); }
+                    Ok(())
+                })?;
+                return Ok(if nav == Nav::Home { Effect::Home } else { Effect::Stay });
+            }
+            2 => {
+                return self.view("手动完整提示词", &format!("系统提示词（可留空）\n\n{}\n\n完整章节提示词\n\n{}\n\n以上内容原文发送。草稿保留至退出 CLI。", draft.prompts.system, draft.prompts.user));
+            }
+            3 => self.manual_drafts.get_mut(&key).unwrap().overwrite = !draft.overwrite,
+            4 => {
+                let text = answer!(self.input("输入预算（500—100000 tokens）", &draft.input_budget.to_string()));
+                let budget = text.parse::<usize>().map_err(|_| "输入预算必须是整数")?;
+                if !(500..=100000).contains(&budget) { return Err("输入预算应为 500—100000 tokens".into()); }
+                self.manual_drafts.get_mut(&key).unwrap().input_budget = budget;
+            }
+            5 => {
+                let mut submitted = draft.clone();
+                // Validate the complete prompt before any overwrite dialog or worker starts.
+                submitted.action(id)?;
+                if core::project_source::chapter_path(&self.ctx.project_dir, id)?.is_file() && !draft.overwrite {
+                    if !answer!(self.confirm("覆盖已有正文（自动备份）？")) { return Ok(Effect::Stay); }
+                    submitted.overwrite = true;
+                }
+                let output = crate::jobs::submit(self.ctx.clone(), submitted.action(id)?, true)?;
+                return Ok(Effect::Push(Page::Job(output["id"].as_str().ok_or("任务缺少 ID")?.to_string())));
+            }
+            6 => {
+                if !answer!(self.confirm("清空本章手动提示词草稿？")) { return Ok(Effect::Stay); }
+                self.manual_drafts.insert(key, ManualDraft::default());
+            }
+            _ => return Err("无效的手动生成操作".into()),
+        }
+        Ok(Effect::Stay)
+    }
     fn open_preview(&mut self, id: &str) -> Result<Effect> {
         let key = (self.ctx.project_dir.clone(), id.to_string());
         let draft = self.drafts.get(&key).ok_or("本章生成草稿不存在")?;
@@ -1385,12 +1445,13 @@ impl App {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum JobAction { Read, Edit, Report, Details, Logs, Refresh, Cancel, Back, Home }
+enum JobAction { Read, Edit, Report, Details, Logs, Refresh, Cancel, Back, Home, Modules }
 impl JobAction {
     fn label(self) -> &'static str {
         match self {
             Self::Read => "阅读正文", Self::Edit => "编辑正文", Self::Report => "查看报告",
             Self::Details => "任务详情 / 错误", Self::Logs => "阶段日志", Self::Refresh => "刷新状态",
+            Self::Modules => "模块导航",
             Self::Cancel => "请求安全取消", Self::Back => "返回上一级", Self::Home => "返回主页",
         }
     }
@@ -1399,6 +1460,7 @@ fn job_target(action: &crate::jobs::Action) -> (&str, &'static str, Option<&'sta
     use crate::jobs::Action;
     match action {
         Action::Generate(g) => (&g.id, "生成正文", Some("generation")),
+        Action::GenerateManual { id, .. } => (id, "手动完整提示词生成", Some("generation")),
         Action::Check { id } => (id, "一致性检查", Some("consistency")),
         Action::Memory { id } => (id, "更新记忆", Some("memory")),
         Action::Titles { id, .. } => (id, "生成章名", None),
@@ -1435,19 +1497,18 @@ fn job_summary(status: &crate::jobs::Status, action: &crate::jobs::Action) -> St
 }
 fn render_job(f: &mut ratatui::Frame, path: &str, status: &crate::jobs::Status, action: &crate::jobs::Action, no_color: bool, state: &mut ListState) {
     let actions = job_actions(status, action);
-            let [header, body, footer] = regions(f.area());
-            f.render_widget(Paragraph::new(short_path(path, header.width)), header);
+            let [_, body, footer] = ui::chrome(f, path, no_color);
             let summary = job_summary(status, action);
             let (lines, _) = layout(&summary.chars().collect::<Vec<_>>(), body.width.saturating_sub(2).max(1) as usize, false);
             let parts = Layout::vertical([
                 Constraint::Length((lines.len() as u16 + 2).min(body.height / 2)), Constraint::Min(1),
             ]).split(body);
-            f.render_widget(Paragraph::new(lines.join("\n")).block(Block::default().borders(Borders::ALL)), parts[0]);
+            f.render_widget(Paragraph::new(lines.join("\n")).block(ui::block("任务状态", false, no_color)), parts[0]);
             let highlight = if no_color { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) }
                 else { Style::default().fg(Color::Cyan) };
             f.render_stateful_widget(List::new(actions.iter().enumerate().map(|(i, a)| ListItem::new(format!("{}. {}", i + 1, a.label()))))
-                .block(Block::default().borders(Borders::ALL)).highlight_symbol("› ").highlight_style(highlight), parts[1], state);
-            f.render_widget(Paragraph::new("自动刷新 · ↑↓ / 数字 Enter 选择\nEsc 返回，任务继续运行\nHome / H 主页"), footer);
+                .block(ui::block("结果与操作", true, no_color)).highlight_symbol("› ").highlight_style(highlight), parts[1], state);
+            f.render_widget(Paragraph::new("自动刷新 · ↑↓ / 数字 Enter 选择\nEsc 返回，任务继续运行\nHome/H 主页 · F1 导航"), footer);
 }
 fn job_monitor(path: &str, ctx: &Context, id: &str, plain: bool, no_color: bool,
     state: &mut ListState) -> Result<JobAction> {
@@ -1480,6 +1541,7 @@ fn job_monitor(path: &str, ctx: &Context, id: &str, plain: bool, no_color: bool,
             if k.kind == KeyEventKind::Release { continue; }
             let current = state.selected().unwrap_or(0);
             match k.code {
+                KeyCode::F(1) => return Ok(JobAction::Modules),
                 KeyCode::Esc => return Ok(JobAction::Back),
                 KeyCode::Home | KeyCode::Char('h' | 'H') => return Ok(JobAction::Home),
                 KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(JobAction::Back),
@@ -1500,6 +1562,7 @@ fn job_monitor(path: &str, ctx: &Context, id: &str, plain: bool, no_color: bool,
 }
 pub fn run(mut ctx: Context, plain: bool, no_color: bool) -> Result<()> {
     install_panic_hook();
+    set_no_color(no_color);
     let plain = plain || std::env::var("TERM").as_deref() == Ok("dumb");
     PLAIN.store(plain, std::sync::atomic::Ordering::Relaxed);
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
@@ -1510,14 +1573,17 @@ pub fn run(mut ctx: Context, plain: bool, no_color: bool) -> Result<()> {
         core::project_manager::remember_startup(&ctx)?;
         ctx = Context::new(ctx.data_dir.clone(), None)?;
     }
+    let _terminal_lifetime = session::Lifetime::new(!plain);
     let mut app = App {
         ctx,
         plain,
         no_color,
         nav: Navigation::new(),
         drafts: std::collections::HashMap::new(),
+        manual_drafts: std::collections::HashMap::new(),
         reading: std::collections::HashMap::new(),
         keys: vec![],
+        last_chapter: None, all_jobs: false,
     };
     loop {
         crate::STOP_WAIT.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1529,72 +1595,24 @@ pub fn run(mut ctx: Context, plain: bool, no_color: bool) -> Result<()> {
             app.nav.go(nav);
             continue;
         }
-        let items = match app.items() {
-            Ok(items) => items,
-            Err(error) => {
-                let nav = viewer(&app.path("加载失败"), &error, plain)?;
-                app.nav.go(nav);
-                continue;
-            }
-        };
-        let project = app
-            .ctx
-            .project_dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        let path = if *app.nav.page() == Page::Home {
-            let chapters =
-                core::chapter_titles::list_chapter_details(app.ctx.clone()).unwrap_or_default();
-            let recent = chapters.last().map(|c| c.id.as_str()).unwrap_or("无章节");
-            let jobs = crate::jobs::list(&app.ctx.data_dir)
-                .ok()
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default();
-            let active = jobs
-                .iter()
-                .filter(|j| j["state"] == "running" || j["state"] == "starting")
-                .count();
-            format!(
-                "{}\n{project} · 最近 {recent} · 任务 {active}",
-                app.nav.path()
-            )
-        } else {
-            format!("{}\n项目：{project}", app.nav.path())
-        };
-        let root = *app.nav.page() == Page::Home;
-        let choice = menu_choice(
-            &path,
-            &items,
-            plain,
-            no_color,
-            &mut app.nav.frames.last_mut().unwrap().list,
-            root,
-        )?;
-        let effect = match choice {
-            Choice::Back => {
-                app.nav.go(Nav::Back);
-                continue;
-            }
-            Choice::Home => {
-                app.nav.go(Nav::Home);
-                continue;
-            }
-            Choice::Selected(index) => match app.act(index) {
+        let effect = match workspace::choose(&mut app) {
+            Ok(action) => match workspace::dispatch(&mut app, action) {
                 Ok(effect) => effect,
                 Err(error) => {
-                    if viewer(&app.path("操作未完成"), &error, plain)? == Nav::Home {
-                        Effect::Home
-                    } else {
-                        Effect::Stay
-                    }
+                    navigation_effect(viewer(&app.path("操作未完成"), &error, plain)?)
                 }
             },
+            Err(error) => {
+                let nav = viewer(&app.path("加载失败"), &error, plain)?;
+                app.nav.go(nav); continue;
+            }
         };
         match effect {
             Effect::Stay => {}
+            Effect::Replace(page) => { app.nav.frames.last_mut().unwrap().page = page; app.nav.frames.last_mut().unwrap().list.select(Some(0)); }
             Effect::Push(page) => app.nav.push(page),
             Effect::Home => app.nav.go(Nav::Home),
+            Effect::Module(module) => app.nav.go(Nav::Module(module)),
             Effect::Exit => return Ok(()),
         }
     }
@@ -1645,7 +1663,7 @@ fn edit_with_save<F: FnMut(&str) -> Result<()>>(
     editor(title, initial, initial, false, false, plain, None, save)
 }
 fn input_dialog(title: &str, default: &str, plain: bool, secret: bool) -> Result<Choice<String>> {
-    if secret {
+    if secret && plain {
         return secret_input(title);
     }
     let mut accepted = None;
@@ -1713,12 +1731,11 @@ fn editor<F: FnMut(&str) -> Result<()>>(
         session
             .terminal
             .draw(|f| {
-                let [header, body, footer] = regions(f.area());
-                f.render_widget(Paragraph::new(short_path(title, header.width)), header);
+                let [_, body, footer] = ui::chrome(f, title, NO_COLOR_UI.load(std::sync::atomic::Ordering::Relaxed));
                 f.render_widget(
                     Paragraph::new(lines.join("\n"))
                         .scroll((offset.min(u16::MAX as usize) as u16, 0))
-                        .block(Block::default().borders(Borders::ALL)),
+                        .block(ui::block("正文 / 内容", true, NO_COLOR_UI.load(std::sync::atomic::Ordering::Relaxed))),
                     body,
                 );
                 let footer_text = if let Some(message) = &message {
@@ -2005,6 +2022,7 @@ fn layout(chars: &[char], width: usize, secret: bool) -> (Vec<String>, Vec<(usiz
     (rows, positions)
 }
 fn external_edit(data: &Path, initial: &str) -> Result<Option<String>> {
+    if !PLAIN.load(std::sync::atomic::Ordering::Relaxed) { session::suspend(); }
     let editor = std::env::var("VISUAL")
         .or_else(|_| std::env::var("EDITOR"))
         .map_err(|_| "请设置 VISUAL 或 EDITOR；也可以使用内置编辑器".to_string())?;
@@ -2134,6 +2152,52 @@ fn plain_editor<F: FnMut(&str) -> Result<()>>(
 mod tests {
     use super::*;
     #[test]
+    fn manual_draft_is_independent_and_roundtrips_exact_prompt_in_worker_request() {
+        let mut draft = ManualDraft::default();
+        assert!(draft.action("ch001").is_err());
+        draft.prompts.user = "【人物状态】\n{{人物状态}}\n完整内容原样发送。\n".into();
+        let encoded = serde_json::to_vec(&draft.action("ch001").unwrap()).unwrap();
+        let action: crate::jobs::Action = serde_json::from_slice(&encoded).unwrap();
+        match &action {
+            crate::jobs::Action::GenerateManual { id, prompts, overwrite, input_budget } => {
+                assert_eq!(id, "ch001");
+                assert_eq!(prompts, &draft.prompts);
+                assert!(!overwrite);
+                assert_eq!(*input_budget, 100000);
+            }
+            _ => panic!("expected manual worker action"),
+        }
+        assert_eq!(job_target(&action), ("ch001", "手动完整提示词生成", Some("generation")));
+        assert!(job_actions(&sample_job("succeeded"), &action).contains(&JobAction::Read));
+    }
+    #[test]
+    fn manual_workbench_opens_with_broken_templates_and_retains_chapter_drafts() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Context::new(dir.path().join("data"), Some(dir.path().join("book"))).unwrap();
+        core::project_manager::open_project(ctx.clone(), ctx.project_dir.display().to_string(), true, None, None).unwrap();
+        fs::write(ctx.project_dir.join(".prompt-settings.json"), "broken settings").unwrap();
+        let mut app = App { ctx, plain: true, no_color: true, nav: Navigation::new(),
+            keys: vec![], last_chapter: None, all_jobs: false, drafts: Default::default(), manual_drafts: Default::default(), reading: Default::default() };
+        app.nav.push(Page::Chapter("ch001".into()));
+        assert_eq!(app.items().unwrap()[10], "手动完整提示词工作台");
+        match app.act(10).unwrap() {
+            Effect::Push(page @ Page::ManualGenerate(_)) => app.nav.push(page),
+            _ => panic!("manual workbench entry did not open"),
+        }
+        assert!(app.items().unwrap()[0].contains("编辑完整章节提示词"));
+        let key = (app.ctx.project_dir.clone(), "ch001".into());
+        app.manual_drafts.get_mut(&key).unwrap().prompts.user = "独立草稿".into();
+        app.nav.go(Nav::Home);
+        app.nav.push(Page::ManualGenerate("ch002".into()));
+        app.items().unwrap();
+        assert!(app.manual_drafts[&(app.ctx.project_dir.clone(), "ch002".into())].prompts.user.is_empty());
+        app.nav.go(Nav::Home);
+        app.nav.push(Page::ManualGenerate("ch001".into()));
+        app.items().unwrap();
+        assert_eq!(app.manual_drafts[&key].prompts.user, "独立草稿");
+        assert!(app.drafts.is_empty());
+    }
+    #[test]
     fn benchmark_fields_save_independently_and_reset_without_changing_other_templates() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Context::new(dir.path().join("data"), Some(dir.path().join("book"))).unwrap();
@@ -2216,7 +2280,7 @@ mod tests {
         assert_eq!(edited.memory, before.memory);
         assert_eq!(edited.generation_preset, before.generation_preset);
         assert!(save_template_field(&ctx, PromptCategory::Compact, true, &before.compact_generation.system, "旧会话修改").is_err());
-        assert!(save_template_field(&ctx, PromptCategory::Compact, false, &before.compact_generation.user_template, "缺少骨架").is_err());
+        assert!(save_template_field(&ctx, PromptCategory::Compact, false, &before.compact_generation.user_template, "{{未知变量}}").is_err());
         assert_eq!(core::get_prompt_settings(ctx).unwrap(), edited);
     }
 

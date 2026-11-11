@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { api, LlmProvider, Settings } from "../api";
-import { useT } from "../i18n";
+import { useUi, Lang, Theme } from "../i18n";
 import { Banner, Field, Spinner } from "./common";
 import { useProjectActivities, useProjectActivity } from "../projectActivity";
 
 export default function SettingsPanel({ root, onSaved }: { root: string; onSaved: () => Promise<void> }) {
-  const t = useT();
+  const { t, lang, setLang, theme, setTheme } = useUi();
   const [settings, setSettings] = useState<Settings>({
     project_dir: "",
     llm_base_url: "http://127.0.0.1:18180/v1",
@@ -83,6 +83,7 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
         <h2>{t("st.title")}</h2>
         <p className="muted">{t("st.desc")}</p>
 
+        <h3>{t("ui.projectSettings")}</h3>
         <Field label={t("st.projectDir")} hint={t("st.projectDirHint")}>
           <input
             value={settings.project_dir}
@@ -94,6 +95,7 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
           <input value={sourceDirectory} onChange={(e) => { setSourceDirectory(e.target.value); setDirty(true); }} placeholder="正文 / chapters" />
         </Field>
 
+        <h3>{t("ui.modelSettings")}</h3>
         <Field label={t("st.provider")} hint={t("st.providerHint")}>
           <select
             value={provider}
@@ -158,6 +160,19 @@ export default function SettingsPanel({ root, onSaved }: { root: string; onSaved
 
         {banner ? <Banner kind={banner.kind}>{banner.msg}</Banner> : null}
 
+        <h3>{t("ui.display")}</h3>
+        <div className="row">
+          <Field label={t("topbar.theme")}>
+            <select value={theme} onChange={(e) => setTheme(e.target.value as Theme)}>
+              {(["light", "dark", "warm"] as Theme[]).map((value) => <option key={value} value={value}>{t(`theme.${value}`)}</option>)}
+            </select>
+          </Field>
+          <Field label={t("topbar.lang")}>
+            <select value={lang} onChange={(e) => setLang(e.target.value as Lang)}>
+              <option value="zh">中文</option><option value="en">English</option>
+            </select>
+          </Field>
+        </div>
         <div className="root-info">
           <span className="muted">{t("st.root")}</span>
           <code>{root || t("st.locating")}</code>

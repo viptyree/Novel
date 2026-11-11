@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ChapterDetails, OpenProjectOptions } from "./api";
 import ProjectSwitcher from "./components/ProjectSwitcher";
+import Icon, { IconName } from "./components/Icon";
 import { ProjectActivityProvider, useProjectActivities } from "./projectActivity";
 import { useUi, Lang, Theme } from "./i18n";
 import logo from "./assets/logo.png";
@@ -14,13 +15,13 @@ import "./App.css";
 
 type Tab = "workbench" | "reports" | "memory" | "settings" | "prompts" | "guide";
 
-const NAV: { key: Tab; labelKey: string; icon: string }[] = [
-  { key: "workbench", labelKey: "nav.workbench", icon: "✍️" },
-  { key: "reports", labelKey: "nav.reports", icon: "📋" },
-  { key: "memory", labelKey: "nav.memory", icon: "🧠" },
-  { key: "prompts", labelKey: "nav.prompts", icon: "📝" },
-  { key: "settings", labelKey: "nav.settings", icon: "⚙️" },
-  { key: "guide", labelKey: "nav.guide", icon: "📖" },
+const NAV: { key: Tab; labelKey: string; icon: IconName }[] = [
+  { key: "workbench", labelKey: "nav.workbench", icon: "workbench" },
+  { key: "reports", labelKey: "nav.reports", icon: "reports" },
+  { key: "memory", labelKey: "nav.memory", icon: "memory" },
+  { key: "prompts", labelKey: "nav.prompts", icon: "prompts" },
+  { key: "settings", labelKey: "nav.settings", icon: "settings" },
+  { key: "guide", labelKey: "nav.guide", icon: "guide" },
 ];
 
 const GITHUB_URL = "https://github.com/DuckTraDo";
@@ -46,6 +47,7 @@ export default function App() {
 function AppContent() {
   const { t, lang, setLang, theme, setTheme } = useUi();
   const activities = useProjectActivities();
+  const [focusMode, setFocusMode] = useState(false);
   const [tab, setTab] = useState<Tab>("workbench");
   const [chapterDetails, setChapterDetails] = useState<ChapterDetails[]>([]);
   const chapters = chapterDetails.map((chapter) => chapter.id);
@@ -113,9 +115,9 @@ function AppContent() {
   }
 
   return (
-    <div className="app">
+    <div className={`app${focusMode && tab === "workbench" ? " focus-mode" : ""}`}>
       <nav className="sidebar">
-        <div className="brand">
+        <div className="brand" title="Sodarie Novel">
           <img className="brand-logo" src={logo} alt="Sodarie Novel" />
           <div>
             <div className="brand-title">Sodarie Novel</div>
@@ -128,10 +130,10 @@ function AppContent() {
             <button
               key={n.key}
               className={tab === n.key ? "nav active" : "nav"}
+              title={t(n.labelKey)} aria-label={t(n.labelKey)} aria-current={tab === n.key ? "page" : undefined}
               onClick={() => setTab(n.key)}
             >
-              <span className="nav-icon">{n.icon}</span>
-              {t(n.labelKey)}
+              <Icon name={n.icon} /><span className="nav-label">{t(n.labelKey)}</span>
             </button>
           ))}
         </div>
@@ -140,7 +142,7 @@ function AppContent() {
           <div className="chapters-count">
             {t("sidebar.chapters")} · {chapters.length}
           </div>
-          <button className="madeby" onClick={() => api.openUrl(GITHUB_URL)}>
+          <button title="DuckTraDo · GitHub" aria-label="DuckTraDo · GitHub" className="madeby" onClick={() => api.openUrl(GITHUB_URL)}>
             <GithubMark />
             <span className="madeby-text">
               <span className="madeby-label">{t("madeBy")}</span>
@@ -153,42 +155,35 @@ function AppContent() {
 
       <main className="content">
         <header className="topbar">
-          <div className="topbar-project"><h1 className="topbar-title">{t(currentLabel)}</h1>
-            <ProjectSwitcher root={root} onOpen={openProject} />
+          <div className="topbar-project"><h1 className="topbar-title">{tab === "workbench" ? "Sodarie Novel" : t(currentLabel)}</h1>
+            {tab !== "workbench" && <ProjectSwitcher root={root} onOpen={openProject} />}
           </div>
           <div className="topbar-controls">
-            <div className="seg" role="group" aria-label={t("topbar.theme")}>
-              {THEMES.map((th) => (
-                <button
-                  key={th.key}
-                  className={theme === th.key ? "seg-btn active" : "seg-btn"}
-                  title={t(th.labelKey)}
-                  onClick={() => setTheme(th.key)}
-                >
-                  <span className="seg-icon">{th.icon}</span>
-                </button>
-              ))}
-            </div>
-            <div className="seg" role="group" aria-label={t("topbar.lang")}>
-              {(["zh", "en"] as Lang[]).map((l) => (
-                <button
-                  key={l}
-                  className={lang === l ? "seg-btn active" : "seg-btn"}
-                  onClick={() => setLang(l)}
-                >
-                  {l === "zh" ? "中" : "EN"}
-                </button>
-              ))}
-            </div>
+            <details className="appearance-menu" onKeyDown={(e) => { if (e.key === "Escape") { e.currentTarget.open = false; e.currentTarget.querySelector("summary")?.focus(); } }} onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) e.currentTarget.open = false; }}>
+              <summary><Icon name="settings" />{t("ui.appearance")}</summary>
+              <div className="appearance-popover">
+                <span className="field-label">{t("topbar.theme")}</span>
+                <div className="seg" role="group" aria-label={t("topbar.theme")}>
+                  {THEMES.map((th) => <button key={th.key} className={theme === th.key ? "seg-btn active" : "seg-btn"} aria-pressed={theme === th.key} onClick={() => setTheme(th.key)}>{t(th.labelKey)}</button>)}
+                </div>
+                <span className="field-label">{t("topbar.lang")}</span>
+                <div className="seg" role="group" aria-label={t("topbar.lang")}>
+                  {(["zh", "en"] as Lang[]).map((l) => <button key={l} className={lang === l ? "seg-btn active" : "seg-btn"} aria-pressed={lang === l} onClick={() => setLang(l)}>{l === "zh" ? "中文" : "English"}</button>)}
+                </div>
+              </div>
+            </details>
           </div>
         </header>
 
-        <fieldset className="page project-page" disabled={switching} key={projectRevision}>
+        <fieldset className={`page project-page ${tab === "workbench" ? "workspace-page" : "document-page"}`} disabled={switching} key={projectRevision}>
           {error ? <div className="banner banner-err">{error}</div> : null}
 
-          <div hidden={tab !== "workbench"}>
+          <div className="workbench-host" hidden={tab !== "workbench"}>
             <ChapterWorkbench
               key={`${root}:${sourceKey}`}
+              focusMode={focusMode}
+              onFocusChange={setFocusMode}
+              projectSwitcher={<ProjectSwitcher root={root} onOpen={openProject} />}
               promptRevision={promptRevision}
               chapters={chapters}
               chapterDetails={chapterDetails}

@@ -1,12 +1,15 @@
 import { ReactNode } from "react";
+import { useT } from "../i18n";
 
 export function Spinner() {
-  return <span className="spinner" aria-label="处理中" />;
+  const t = useT();
+  return <span className="spinner" role="status" aria-label={t("ui.loading")} />;
 }
 
 export function LogBox({ log }: { log: string }) {
+  const t = useT();
   if (!log) return null;
-  return <pre className="logbox">{log}</pre>;
+  return <details className="activity-log"><summary>{t("ui.logs")}</summary><pre className="logbox">{log}</pre></details>;
 }
 
 export function Banner({
@@ -16,7 +19,7 @@ export function Banner({
   kind: "ok" | "err" | "info";
   children: ReactNode;
 }) {
-  return <div className={`banner banner-${kind}`}>{children}</div>;
+  return <div role={kind === "err" ? "alert" : "status"} className={`banner banner-${kind}`}>{children}</div>;
 }
 
 export function Field({

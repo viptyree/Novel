@@ -30,6 +30,12 @@ pub struct Generation {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     Generate(Generation),
+    GenerateManual {
+        id: String,
+        prompts: core::PromptPair,
+        overwrite: bool,
+        input_budget: usize,
+    },
     Check {
         id: String,
     },
@@ -297,6 +303,8 @@ fn worker_inner(data: &Path, id: &str) -> Result<()> {
             g.prompt_override,
             Some(g.options),
         )?),
+        Action::GenerateManual { id, prompts, overwrite, input_budget } =>
+            checked(core::generate_manual_chapter(ctx, id, prompts, overwrite, input_budget)?),
         Action::Check { id } => checked(core::check_consistency(ctx, id)?),
         Action::Memory { id } => checked(core::update_memory(ctx, id)?),
         Action::Titles {

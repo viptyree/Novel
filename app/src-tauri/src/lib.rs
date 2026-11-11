@@ -199,6 +199,22 @@ async fn generate_chapter(
 }
 
 #[tauri::command]
+async fn generate_chapter_manual(
+    app: tauri::AppHandle,
+    chapter_id: String,
+    prompts: PromptPair,
+    overwrite: bool,
+    input_budget: u32,
+) -> Result<CommandResult, String> {
+    let context = engine(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        novel_core::generate_manual_chapter(context, chapter_id, prompts, overwrite, input_budget as usize)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn check_consistency(
     app: tauri::AppHandle,
     chapter_id: String,
@@ -365,6 +381,7 @@ pub fn run() {
             save_prompt_settings,
             preview_generation_prompt,
             generate_chapter,
+            generate_chapter_manual,
             check_consistency,
             update_memory,
             reset_chapter,

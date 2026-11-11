@@ -187,3 +187,50 @@ fn legacy_generation_presets_save_through_checked_api_and_reject_stale_edits() {
     assert!(core::save_prompt_checked(ctx, before.clone(), serde_json::to_value(before).unwrap())
         .unwrap_err().contains("内容冲突"));
 }
+
+#[test]
+fn legacy_templates_do_not_block_editing_or_using_another_preset() {
+    let (_dir, ctx) = setup();
+    let mut legacy = core::default_prompt_settings();
+    legacy.user_template = "【人物状态】\n{{人物状态}}\n{{事件骨架}}".into();
+    legacy.compact_generation.user_template = "{{前情}}\n{{事件骨架}}".into();
+    legacy.consistency.user_template = "{{人物状态}}\n{{章节正文}}".into();
+    legacy.memory.user_template = "{{人物状态}}\n{{章节正文}}".into();
+    fs::write(ctx.project_dir.join(".prompt-settings.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+    let save = |before: &core::PromptSettings, next: core::PromptSettings| {
+        core::save_prompt_checked(ctx.clone(), next, serde_json::to_value(before).unwrap())
+    };
+    let preview = |preset| core::preview_generation_prompt(ctx.clone(), "ch001".into(), "进入山谷".into(),
+        1000, false, String::new(), String::new(), Some(core::context::Options { generation_preset: Some(preset), ..Default::default() }));
+    let mut edited = legacy.clone();
+    edited.benchmark_generation.system = "对标系统".into();
+    save(&legacy, edited.clone()).unwrap();
+    let mut ready = edited.clone();
+    ready.benchmark_generation.user_template = "【人物状态】\n固定角色说明\n{{角色档案}}\n【本章】\n{{事件骨架}}".into();
+    ready.generation_preset = core::GenerationPreset::Benchmark;
+    save(&edited, ready.clone()).unwrap();
+    let rendered = preview(core::GenerationPreset::Benchmark).unwrap();
+    assert!(rendered.prompts.user.contains("【人物状态】\n固定角色说明"));
+    let error = preview(core::GenerationPreset::General).err().unwrap();
+    assert!(error.contains("通用方案 → 任务模板"));
+    assert!(error.contains("第 2 行"));
+    assert!(error.contains("{{角色档案}}"));
+    let mut system_edit = ready.clone();
+    system_edit.system = "仅修改系统文字".into();
+    save(&ready, system_edit.clone()).unwrap();
+    let mut draft = system_edit.clone();
+    draft.user_template = "【人物状态】\n尚未填好".into();
+    save(&system_edit, draft.clone()).unwrap();
+    assert!(preview(core::GenerationPreset::General).err().unwrap().contains("事件骨架"));
+    let mut invalid = draft.clone();
+    invalid.user_template = "【人物状态】\n{{人物状态}}".into();
+    let error = save(&draft, invalid).unwrap_err();
+    assert!(error.contains("通用方案 → 任务模板"));
+    assert!(error.contains("第 2 行"));
+    assert_eq!(core::get_prompt_settings(ctx.clone()).unwrap(), draft);
+    assert!(core::save_prompt_settings(ctx.clone(), draft.clone()).is_err());
+    assert_eq!(draft.consistency, legacy.consistency);
+    assert_eq!(draft.memory, legacy.memory);
+    assert_eq!(draft.compact_generation, legacy.compact_generation);
+    assert!(save(&ready, ready.clone()).unwrap_err().contains("内容冲突"));
+}

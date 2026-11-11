@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise real TUI key events in an isolated Unix PTY. Uses only Python's standard library."""
+"""Exercise TUI keys with isolated projects. Unix uses stdlib PTY; Windows uses pywinpty."""
 import argparse
 import codecs
 import os
@@ -14,28 +14,49 @@ import unicodedata
 from pathlib import Path
 
 if os.name == 'nt':
-    print('PTY navigation checks run on macOS/Linux; Windows still runs Rust CLI tests.')
-    sys.exit(0)
-import fcntl
-import pty
-import termios
+    try:
+        from winpty import PtyProcess
+    except ImportError:
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'target/ui-check/python'))
+        from winpty import PtyProcess
+else:
+    import fcntl
+    import pty
+    import termios
+
+class WindowsProcess:
+    def __init__(self, process): self.pty = process
+    def poll(self): return None if self.pty.isalive() else self.pty.exitstatus
+    def wait(self, timeout=5):
+        end = time.monotonic() + timeout
+        while self.pty.isalive() and time.monotonic() < end: time.sleep(.02)
+        if self.pty.isalive(): raise TimeoutError('CLI did not exit')
+        return self.pty.exitstatus
+    def kill(self): self.pty.terminate(force=True)
 
 ESC = b'\x1b'
 HOME = b'\x1b[H'
 ENTER = b'\r'
 
 class Terminal:
-    def __init__(self, command, width=40):
+    def __init__(self, command, width=40, env=None):
         self.width, self.height = width, 24
         self.cells = [[' '] * width for _ in range(self.height)]
         self.x = self.y = 0
         self.pending = ''
         self.decoder = codecs.getincrementaldecoder('utf-8')('replace')
-        self.master, slave = pty.openpty()
-        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', self.height, width, 0, 0))
-        self.process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
-                                        env={**os.environ, 'TERM': 'xterm-256color'}, start_new_session=True)
-        os.close(slave)
+        terminal_env = {**os.environ, "TERM":"xterm-256color", **(env or {})}
+        self.winpty = None
+        if os.name == 'nt':
+            self.winpty = PtyProcess.spawn(command, dimensions=(self.height, width), env=terminal_env)
+            self.process = WindowsProcess(self.winpty)
+            self.master = self.winpty.fileobj
+        else:
+            self.master, slave = pty.openpty()
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack('HHHH', self.height, width, 0, 0))
+            self.process = subprocess.Popen(command, stdin=slave, stdout=slave, stderr=slave,
+                                            env=terminal_env, start_new_session=True)
+            os.close(slave)
         self.raw = bytearray()
         self.pump(.3)
 
@@ -46,7 +67,7 @@ class Terminal:
     def feed(self, data):
         self.raw.extend(data)
         if b'\x1b[6n' in data:
-            os.write(self.master, b'\x1b[1;1R')
+            self.write(b'\x1b[1;1R')
         self.pending += self.decoder.decode(data)
         while self.pending:
             if self.pending.startswith('\x1b['):
@@ -88,14 +109,26 @@ class Terminal:
         end = time.monotonic()+seconds
         while time.monotonic()<end:
             if select.select([self.master], [], [], min(.03, max(0,end-time.monotonic())))[0]:
-                try: data = os.read(self.master, 65536)
-                except OSError: break
+                try: data = self.winpty.read(65536).encode() if self.winpty else os.read(self.master, 65536)
+                except (OSError, EOFError): break
                 if not data: break
                 self.feed(data)
 
+    def write(self, data):
+        if self.winpty: self.winpty.write(data if isinstance(data,str) else data.decode())
+        else: os.write(self.master, data.encode() if isinstance(data,str) else data)
+
     def send(self, data):
-        os.write(self.master, data.encode() if isinstance(data,str) else data)
+        self.write(data)
         self.pump(.35)
+
+    def resize(self, width, height=24):
+        self.width, self.height = width, height
+        self.cells = [[' '] * width for _ in range(height)]
+        self.x = self.y = 0
+        if self.winpty: self.winpty.setwinsize(height,width)
+        else: fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack('HHHH',height,width,0,0))
+        self.pump(.4)
 
     def expect(self, text):
         end = time.monotonic()+4
@@ -114,7 +147,8 @@ class Terminal:
         if self.process.poll() is None:
             self.process.kill()
         self.process.wait()
-        os.close(self.master)
+        if self.winpty: self.winpty.close()
+        else: os.close(self.master)
 
 
 def check(binary):
@@ -122,152 +156,126 @@ def check(binary):
         data, project = Path(directory)/'data', Path(directory)/'测试项目'
         base = [str(binary), '--data-dir', str(data)]
         def cli(*args):
-            subprocess.run(base+list(args), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            return subprocess.run(base+list(args), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         cli('project', 'create', str(project))
         cli('chapter', 'new', 'ch001')
         chapter = project/'chapters/ch001/chapter.md'
-        chapter.write_text('旧稿', encoding='utf-8')
-        term = Terminal(base+['tui'])
+        chapter.write_text('旧稿\n' + '山中的来信，终于送到了门前。\n'*30, encoding='utf-8')
+        term = Terminal(base+['tui'], width=120)
         try:
-            term.expect('章节工作台')
-            term.back()
-            term.expect('Esc 已在主页')
-            assert term.process.poll() is None, 'Esc on homepage must not exit'
-            term.choose(2);term.expect('章节工作台')
-            term.choose(1);term.expect('阅读正文')
-            term.choose(1);term.expect('旧稿')
-            term.back();term.expect('编辑正文')
-            term.back();term.expect('输入章号 / 新章节')
-            # Visible back button is equivalent to Esc.
-            term.choose(3);term.expect('Esc 已在主页')
-            # Dirty editor: continue, discard, save, and save-before-home.
-            term.choose(2);term.choose(1);term.choose(2)
-            term.send('未保存');term.home();term.expect('回主页前保存？')
+            term.expect('进入章节工作台')
+            term.back(); term.expect('进入章节工作台')
+            assert term.process.poll() is None
+            term.choose(1); term.expect('ch001'); term.choose(1)
+            term.expect('旧稿'); term.expect('编辑正文')
+            # The wide workspace displays navigation, directory and manuscript.
+            assert '导航' in term.screen and '章节目录' in term.screen
+            snapshots = Path('target/ui-check')
+            snapshots.mkdir(parents=True,exist_ok=True)
+            (snapshots/'cli-wide.txt').write_text(term.screen,encoding='utf-8')
+            for width in [94,40,120]:
+                term.resize(width);term.expect('旧稿')
+            term.send(b'\x1b[B'); term.send(b'\x1b[B')
+            term.send('e'); term.send('未保存'); term.home();term.expect('回主页前保存？')
             term.send('c');term.expect('Ctrl+S / F2 保存')
-            term.back();term.expect('返回前保存？');term.send('d');term.expect('阅读正文')
-            assert chapter.read_text(encoding='utf-8') == '旧稿'
-            term.choose(2);term.send(b'\x01');term.send('首');term.send(b'\x05');term.send('尾');term.send(b'\x13')
-            term.expect('阅读正文');assert chapter.read_text(encoding='utf-8') == '首旧稿尾'
-            term.choose(2);term.send('保存后主页');term.home();term.expect('回主页前保存？');term.send('s');term.expect('Esc 已在主页')
-            assert chapter.read_text(encoding='utf-8').endswith('保存后主页')
-            # Search closes before the editor does; a conflict must retain the editor buffer.
-            term.choose(2);term.choose(1);term.choose(2)
-            term.send(b'\x06');term.send('旧稿');term.back();term.expect('Ctrl+S / F2 保存')
-            chapter.write_text('外部新版', encoding='utf-8')
+            term.back();term.expect('返回前保存？');term.send('d');term.expect('编辑正文')
+            assert chapter.read_text(encoding='utf-8').startswith('旧稿')
+            term.send('e');term.send(b'\x01');term.send('首');term.send(b'\x13')
+            term.expect('编辑正文');assert '首' in chapter.read_text(encoding='utf-8')
+            term.send('e');term.send(b'\x06');term.send('旧稿');term.back();term.expect('Ctrl+S / F2 保存')
+            chapter.write_text('外部新版',encoding='utf-8')
             term.send('冲突稿');term.send(b'\x13');term.expect('保存失败')
-            assert chapter.read_text(encoding='utf-8') == '外部新版'
-            term.back();term.send('d');term.expect('阅读正文')
-            # A failed command returns to the same chapter's action menu.
-            term.choose(4);term.expect('内容冲突');term.back();term.expect('阅读正文')
-            # Generation drafts survive Home and re-entry without submitting a model request.
-            term.choose(5);term.choose(1);term.send('生成草稿');term.send(b'\x13');term.expect('生成设置')
-            term.home();term.choose(2);term.choose(1);term.choose(5);term.choose(1);term.expect('生成草稿')
-            term.back();term.expect('生成设置')
-            # The generation page previews its own draft without submitting a worker or touching prose.
-            term.choose(3)  # Disable context so the short prompt fits the terminal viewport.
-            before_preview = chapter.read_text(encoding='utf-8')
-            term.choose(9);term.expect('编辑系统提示词');term.choose(1)
-            term.expect('系统提示词');term.expect('章节提示词');term.expect('生成草稿')
-            assert chapter.read_text(encoding='utf-8') == before_preview
-            assert not list((data/'jobs').glob('*/request.json')), 'Preview must not submit jobs'
-            term.back();term.expect('编辑章节提示词')
-            term.back();term.expect('提交后台生成')
-            term.back();term.expect('阅读正文');term.home()
-            # Memory, project, report, and empty job screens all return by one level.
-            term.choose(3);term.choose(1);term.choose(1);term.back();term.expect('内置编辑器')
-            term.back();term.expect('memory/story_bible.yaml');term.home()
-            term.choose(1);term.choose(1);term.back();term.expect('按路径打开');term.home()
-            term.choose(6);term.choose(1);term.choose(1);term.back();term.expect('一致性报告')
-            term.back();term.expect('输入章号 / 新章节');term.home()
-            term.choose(7);term.expect('返回上一级');term.back();term.expect('Esc 已在主页')
-            term.choose(9);term.pump(.2);assert term.process.wait(timeout=3) == 0
-            assert b'\x1b[?1049l' in term.raw
-        finally: term.close()
-        prompt_file = project/'.prompt-settings.json'
-        prompt_before = prompt_file.read_bytes() if prompt_file.exists() else None
-        # Per-chapter scheme and editable previews remain local; stale edits cannot submit a job.
-        term = Terminal(base+['tui'], width=80)
-        try:
-            term.expect('章节工作台')
-            term.choose(2);term.choose(1);term.choose(5)
-            term.choose(1);term.send('进入山谷');term.send(b'\x13')
-            term.choose(3)  # Disable context.
-            term.choose(11);term.expect('跟随项目默认');term.choose(3)
-            term.expect('本章生成方案：精简四段式')
-            import json
-            current = json.loads(subprocess.check_output(base+['prompt','preset']))
-            assert current['generation_preset'] == 'general', 'Chapter selection changed the project default'
-            term.choose(9);term.expect('编辑章节提示词')
-            term.choose(2);term.send(b'\x01');term.send('系统标记：');term.send(b'\x13')
-            term.expect('编辑章节提示词')
-            term.choose(3);term.send(b'\x01');term.send('正文标记：');term.send(b'\x13')
-            term.expect('查看完整提示词')
-            term.choose(1);term.expect('系统标记：');term.send(b'\x1b[6~');term.expect('正文标记：')
-            term.back();term.back();term.expect('已采用本章预览')
-            assert (prompt_file.read_bytes() if prompt_file.exists() else None) == prompt_before, 'Local preview wrote project templates'
-            # Reopening must preserve the adopted edits.
-            term.choose(9);term.choose(1);term.expect('系统标记：');term.back();term.back()
-            # Editing the outline invalidates the adoption before any overwrite confirmation or worker.
-            term.choose(1);term.send('变化');term.send(b'\x13')
-            term.choose(10);term.expect('本章手动预览已过期');term.back()
+            assert chapter.read_text(encoding='utf-8')=='外部新版'
+            term.back();term.send('d');term.expect('编辑正文')
+            # Generation, preview and manual mode retain independent per-chapter drafts.
+            term.send('g');term.expect('编辑事件骨架');term.choose(2)
+            term.send('进入山谷');term.send(b'\x13');term.expect('事件骨架')
+            term.choose(7);term.expect('高级生成选项');term.choose(1) # disable memory
+            term.back();term.choose(5);term.expect('编辑系统提示词')
             assert not list((data/'jobs').glob('*/request.json'))
-            # A fresh preview follows the updated input; reset clears the previous local edits.
-            term.choose(9);term.choose(1);term.expect('变化');term.back();term.choose(5)
-            term.choose(1);term.expect('系统提示词')
-            assert '系统标记：' not in term.screen
-            term.back();term.back();term.expect('当前自动');term.home()
-            term.choose(9);assert term.process.wait(timeout=3) == 0
+            term.choose(2);term.send(b'\x01');term.send('本章系统：');term.send(b'\x13')
+            term.back();term.expect('已采用本章预览')
+            term.choose(2);term.send('变化');term.send(b'\x13')
+            term.choose(6);term.expect('本章手动预览已过期');term.back()
+            assert not list((data/'jobs').glob('*/request.json'))
+            term.choose(1);term.expect('手动完整提示词')
+            term.choose(2);term.send('手动草稿');term.send(b'\x13')
+            term.choose(1);term.expect('事件骨架');term.choose(1)
+            term.choose(2);term.expect('手动草稿');term.back()
+            term.home();term.expect('继续当前章节')
+            term.choose(1);term.expect('外部新版')
+            # Global navigation is reachable from the workbench without walking back.
+            term.send(b'\x1bOP') # F1
+            term.send(b'\x1b[B');term.send(b'\x1b[B');term.send(ENTER)
+            term.expect('作者资料');term.expect('故事设定')
+            term.home();term.expect('继续当前章节')
+            term.choose(7);assert term.process.wait(timeout=5)==0
+            raw=term.raw
+            # One alternate-screen lifetime across menus, readers and editors.
+            assert raw.count(b'\x1b[?1049h')==1, 'Menus repeatedly re-entered alternate screen'
+            assert b'\x1b[?1049l' in raw
         finally: term.close()
-        # Project templates are editable as plain text, independently from chapter previews.
-        import json
-        templates_before = json.loads(subprocess.check_output(base+['prompt','show']))
-        term = Terminal(base+['tui'], width=80)
+        # Search, module popup and editor protection on phone-sized terminals.
+        term=Terminal(base+['--no-color','tui'],width=40)
         try:
-            term.expect('章节工作台')
-            term.choose(4);term.expect('编辑提示词模板（分类）')
-            term.choose(2);term.expect('精简四段式');term.choose(2)
-            term.expect('编辑任务提示词模板')
-            term.choose(1);term.send(b'\x01');term.send('永久系统标记：');term.send(b'\x13')
-            term.expect('编辑任务提示词模板')
-            term.choose(2);term.send(b'\x05');term.send('永久模板标记');term.send(b'\x13')
-            term.expect('查看模板与变量说明')
-            stored = json.loads(subprocess.check_output(base+['prompt','show']))
-            assert stored['compact_generation']['system'].startswith('永久系统标记：')
-            assert stored['compact_generation']['user_template'].endswith('永久模板标记')
-            for field in ('system','user_template','consistency','memory','generation_preset'):
-                assert stored[field] == templates_before[field]
-            # The per-preset guidance toggle saves without touching other fields.
-            term.choose(5)
-            toggled = json.loads(subprocess.check_output(base+['prompt','show']))
-            assert toggled['compact_material_guidance'] != stored['compact_material_guidance']
-            # Reset restores this preset only.
-            term.choose(4);term.choose(2);term.expect('编辑任务提示词模板')
-            reset = json.loads(subprocess.check_output(base+['prompt','show']))
-            assert reset['compact_generation'] == templates_before['compact_generation']
-            for field in ('system','user_template','consistency','memory','generation_preset'):
-                assert reset[field] == stored[field]
-            term.home();term.choose(9);assert term.process.wait(timeout=3) == 0
-        finally: term.close()
-        # Narrow terminal: navigation hints and dirty confirmation remain available.
-        term = Terminal(base+['tui'], width=24)
+            term.expect('进入章节工作台');term.choose(1)
+            term.send('/missing');term.send(ENTER);term.expect('没有匹配项')
+            term.back();term.expect('ch001');term.choose(1);term.expect('外部新版')
+            (Path('target/ui-check')/'cli-narrow.txt').write_text(term.screen,encoding='utf-8')
+            term.send(b'\x1bOP');term.expect('模块导航');term.back()
+            term.send('e');term.send('窄屏稿');term.home();term.expect('回主页前保存？')
+            term.send('d');term.expect('继续当前章节');term.choose(7)
+            assert term.process.wait(timeout=5)==0
+        finally:term.close()
+        # External editor suspends the TUI and restores it after the save.
+        editor=Path(directory)/'external-editor.py'
+        editor.write_text("import sys\nfrom pathlib import Path\np=Path(sys.argv[1]);p.write_text(p.read_text(encoding='utf-8')+' external edit',encoding='utf-8')\n",encoding='utf-8')
+        editor_command='"'+Path(sys.executable).as_posix()+'" "'+editor.as_posix()+'"'
+        term=Terminal(base+['tui'],width=100,env={'VISUAL':editor_command,'NO_COLOR':'1'})
         try:
-            term.expect('章节工作台')
-            term.choose(2);term.choose(1);term.choose(2);term.send('窄屏稿');term.home()
-            term.expect('回主页前保存？');term.send('d');term.expect('Esc 已在主页')
-            term.choose(9);assert term.process.wait(timeout=3) == 0
-        finally: term.close()
-        # Plain mode uses the same hierarchy through 0 / H and explicit menu entries.
-        term = Terminal(base+['--plain'], width=80)
+            term.expect('进入章节工作台');term.choose(1);term.choose(1);term.choose(9)
+            term.expect('external edit')
+            assert chapter.read_text(encoding='utf-8').endswith('external edit')
+            # Secret editing never writes the entered value into terminal output.
+            term.home();term.send(b'\x1bOP')
+            for _ in range(5):term.send(b'\x1b[B')
+            term.send(ENTER);term.expect('模型连接方式');term.choose(3)
+            term.send('fixture-secret-123');term.send(ENTER);term.expect('密钥已保存')
+            assert b'fixture-secret-123' not in term.raw
+            term.back();term.home();term.expect('继续当前章节');term.choose(7)
+            assert term.process.wait(timeout=5)==0
+            assert term.raw.count(b'\x1b[?1049h')==2 # startup and resume after external editor
+        finally:term.close()
+        # A completed task's reader can navigate to a module without losing its target.
+        import json, uuid
+        job_id=str(uuid.uuid4()); job=data/'jobs'/job_id;job.mkdir(parents=True)
+        (job/'status.json').write_text(json.dumps({'id':job_id,'project':str(project),'state':'succeeded','stage':'完成','created_at':'2026-11-11T09:00:00Z','updated_at':'2026-11-11T09:01:00Z','result':None,'error':None}),encoding='utf-8')
+        (job/'request.json').write_text(json.dumps({'project':str(project),'settings':{},'action':{'kind':'check','id':'ch001'}}),encoding='utf-8')
+        term=Terminal(base+['tui'],width=100)
         try:
-            term.expect('章节工作台')
-            term.choose(2);term.choose(1);term.choose(0);term.send('h'+ENTER.decode());term.choose(9)
-            assert term.process.wait(timeout=3) == 0
-            output=term.raw.decode('utf-8', errors='replace').replace('\r\n','\n')
-            assert output.count('主页 › 章节工作台\n') >= 2
+            term.expect('进入章节工作台');term.send(b'\x1bOP')
+            for _ in range(7):term.send(b'\x1b[B')
+            term.send(ENTER);term.expect('已完成');term.choose(1);term.expect('任务状态')
+            term.choose(1);term.expect('external edit')
+            term.send(b'\x1bOP');term.expect('模块导航');term.choose(4)
+            term.expect('作者资料');term.home();term.expect('进入章节工作台');term.choose(6)
+            assert term.process.wait(timeout=5)==0
+        finally:term.close()
+        # Plain mode also requires an interactive terminal; no ANSI screen control.
+        term=Terminal(base+['--plain'],width=80)
+        try:
+            term.expect('进入章节工作台')
+            for line in ['1','1','0','h','7']: term.send(line+ENTER.decode())
+            assert term.process.wait(timeout=5)==0
+            output=term.raw.decode('utf-8',errors='replace')
+            assert '进入章节工作台' in output and '编辑正文' in output
+            assert b'\x1b[?1049h' not in term.raw
         finally: term.close()
-    print('TUI navigation passed: parent/back buttons, Home, editor protection, conflicts, search, drafts, 24-column layout.')
+        no_tty=subprocess.run(base+['tui'],stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=5)
+        assert no_tty.returncode!=0 and '终端' in no_tty.stderr.decode('utf-8')
+    print('TUI navigation passed: wide/narrow layouts, search, global navigation, editor conflicts, previews, manual drafts, plain mode, TTY and screen restoration.')
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--binary', type=Path, default=Path('target/debug/novel'))
+    parser.add_argument('--binary', type=Path, default=Path('target/debug/novel.exe' if os.name == 'nt' else 'target/debug/novel'))
     check(parser.parse_args().binary.resolve())

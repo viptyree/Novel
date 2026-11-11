@@ -22,7 +22,7 @@ Every chapter goes around this loop. The characters, events and foreshadowing yo
 
 ## 🍱 Before you start: feed the Memory
 
-Click the current project name at the top to open **Recent projects**:
+Click the project name above the chapter directory (or in the header on other pages) to open **Recent projects**:
 
 - **New project**: enter an optional name and an absolute path to a new or empty folder.
 - **Open existing project**: enter an existing novel project path. Existing files are kept; only missing templates are added.
@@ -117,7 +117,15 @@ One JSON object per line, holding prose you like (your own, or admired samples).
 
 ## ✍️ The Workbench: what every button does
 
-Open the **✍️ Workbench**. Top to bottom:
+Open the **Workbench**. Chapters sit on the left, the manuscript in the center, and the AI assistant on the right.
+
+- **Chapters**: search by number or title. Expand New chapter, enter an ID or use Auto number, then open the assistant.
+- **Manuscript**: read and edit generated prose in the center; save at the top. Edit chapter title opens title suggestions and renaming. Chapter tools at the bottom contains consistency checks, memory updates and a separate reset section.
+- **AI assistant**: enter an idea, choose the target length, preview prompts or generate. Generation options contains presets, context and narrative controls.
+- **Panels and focus**: collapse either panel from the toolbar. Focus mode hides surrounding tools; click Exit focus to return. At narrow widths the assistant opens as a drawer; Escape closes it.
+- **Appearance & language**: choose light, dark or warm, and Chinese or English from the top-right menu. Panel and page changes preserve drafts; save before closing the application.
+
+The controls are described below:
 
 ### Select chapter / New chapter ID / Auto number
 - **Select chapter**: pick an existing chapter to view or rewrite.
@@ -146,6 +154,14 @@ This chapter already has text and you want to **regenerate** → check it; other
 
 ### Generate / Regenerate
 Click it and the model writes the whole chapter. The button spins — **be patient**: a local model writing 4000 characters usually takes tens of seconds to a few minutes. The text then appears below, along with a Generation report.
+
+### Manual complete prompt (advanced)
+In the AI assistant, switch "Generation mode" to "Fully manual prompts" (equivalent to the CLI's manual workbench):
+- Once you fill in the complete chapter prompt, it is sent **verbatim** to the model — no template, no assembled character/context/event material, no memory or thinking suffix. Target length, narrative controls, and prompt preview are not involved.
+- The system prompt is optional; when set, it is sent as a separate system message.
+- The length of the generated text is up to your prompt. Useful when you already have a mature prompt or want full control over the model input.
+- Set the input budget (500–100000 tokens); estimated length is shown and over-budget generation is blocked.
+- Click "Generate with manual prompt" to run; "Clear manual draft" clears only this chapter. Switch to "Template assembly" for normal generation. Drafts survive mode and chapter changes, and are cleared when closing the app or switching projects.
 
 ### Chapter text (editable) + Save text
 The generated text sits in the box and **you can edit it freely** (fix typos, tweak sentences, cut paragraphs). Click **Save text** when done. Not happy overall? Regenerate from above.
@@ -191,7 +207,7 @@ The adjacent **☑ Incl. memory** decides whether to also wipe **this chapter's 
 
 Models tend to go omniscient, drift POV, and summarize beats that should be *shown*. Use this to control it precisely:
 
-- **Where to set**: expand "Narrative control (optional)" in the Workbench for the current chapter; or set **book-wide defaults** in 🧠 Memory → Story Bible under `narrative_defaults` (chapter overrides book).
+- **Where to set**: expand "Generation options" → "Narrative control (optional)" in the AI assistant for the current chapter; or set **book-wide defaults** in 🧠 Memory → Story Bible under `narrative_defaults` (chapter overrides book).
 - **Point of view**:
   - **Follow book default** / **Third-person limited** (fill "POV character"; only they have interiority, others observed from outside) / **Objective** (invisible observer — only what is visible/audible, no one's inner thoughts) / **First person** / **Omniscient** (not recommended).
   - 👉 For a chapter that needs an *invisible third-party observer describing only what's visible*, pick **Objective**.

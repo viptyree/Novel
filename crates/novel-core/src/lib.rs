@@ -555,6 +555,18 @@ pub struct PromptOverride {
     pub source: String,
 }
 
+/// Complete, author-supplied messages. No template, memory, or thinking suffix is applied.
+pub fn preview_manual_prompt(prompts: PromptPair, input_budget: usize) -> Result<PromptPreview, String> {
+    if prompts.user.trim().is_empty() { return Err("请填写完整章节提示词".into()); }
+    if !(500..=100000).contains(&input_budget) { return Err("输入预算应为 500—100000 tokens".into()); }
+    let estimated_tokens = context::tokens(&prompts.system) + context::tokens(&prompts.user);
+    if estimated_tokens > input_budget { return Err("完整提示词超过输入预算，请精简内容或提高预算".into()); }
+    let source = serde_json::to_string(&("manual", &prompts, input_budget)).map_err(|e| e.to_string())?;
+    let stats = context::Stats { characters: prompts.system.chars().count() + prompts.user.chars().count(),
+        estimated_tokens, budget: input_budget, ..Default::default() };
+    Ok(PromptPreview { prompts, source, stats })
+}
+
 fn load_prompt_settings(project_dir: &Path) -> Result<PromptSettings, String> {
     match fs::read_to_string(project_dir.join(".prompt-settings.json")) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("提示词设置读取失败: {}", e)),
@@ -582,12 +594,22 @@ fn render_prompt_template(template: &str, values: &[(String, String)]) -> Result
     let mut rest = template;
     let mut output = String::new();
     while let Some(start) = rest.find("{{") {
+        let line = template[..template.len() - rest.len() + start].bytes().filter(|b| *b == b'\n').count() + 1;
         output.push_str(&rest[..start]);
         let tail = &rest[start + 2..];
-        let end = tail.find("}}").ok_or("模板变量缺少 }}")?;
+        let end = tail.find("}}").ok_or_else(|| format!("第 {line} 行：模板变量缺少 }}}}"))?;
         let name = tail[..end].trim();
         if !PROMPT_VARIABLES.contains(&name) && reference_chapter(name).is_none() {
-            return Err(format!("未知提示词变量: {{{{{}}}}}", name));
+            let hint = match name {
+                "人物状态" => "；旧变量已移除，请使用 {{角色档案}}",
+                "前情" => "；旧变量已移除，请分别使用 {{章节摘要}}、{{历史事件}}、{{时间线}}",
+                "相关设定与伏笔" => "；旧变量已移除，请分别使用 {{故事圣经}}、{{全书大纲}}、{{伏笔档案}}",
+                "世界观规则" => "；旧变量已移除，请使用 {{故事圣经}}",
+                "近期事件" => "；旧变量已移除，请使用 {{历史事件}}",
+                "伏笔" => "；旧变量已移除，请使用 {{伏笔档案}}",
+                _ => "",
+            };
+            return Err(format!("第 {line} 行：未知提示词变量: {{{{{name}}}}}{hint}"));
         }
         output.push_str(values.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str()).unwrap_or(""));
         rest = &tail[end + 2..];
@@ -609,7 +631,10 @@ fn validate_prompt_variables(template: &str, allowed: &[&str], required: Option<
     let mut has_required = false;
     for caps in re.captures_iter(template) {
         let name = caps[1].trim();
-        if !allowed.contains(&name) && !(allowed == GENERATION_VARIABLES && reference_chapter(name).is_some()) { return Err(format!("当前分类不支持变量: {}", name)); }
+        if !allowed.contains(&name) && !(allowed == GENERATION_VARIABLES && reference_chapter(name).is_some()) {
+            let line = template[..caps.get(0).unwrap().start()].bytes().filter(|b| *b == b'\n').count() + 1;
+            return Err(format!("第 {line} 行：当前分类不支持变量: {name}"));
+        }
         has_required |= Some(name) == required;
     }
     if let Some(required) = required {
@@ -619,17 +644,41 @@ fn validate_prompt_variables(template: &str, allowed: &[&str], required: Option<
 }
 
 fn validate_prompt_settings(settings: &PromptSettings) -> Result<(), String> {
-    validate_task_prompt(&settings.system, &settings.user_template,
-        GENERATION_VARIABLES, "事件骨架")?;
-    validate_task_prompt(&settings.compact_generation.system, &settings.compact_generation.user_template,
-        GENERATION_VARIABLES, "事件骨架")?;
-    // Benchmark is an author-owned draft: each field can be saved independently.
-    validate_prompt_variables(&settings.benchmark_generation.user_template,
-        GENERATION_VARIABLES, None)?;
-    validate_task_prompt(&settings.consistency.system, &settings.consistency.user_template,
-        &["章节ID", "章节正文", "事件骨架", "角色档案", "故事圣经", "伏笔档案", "历史事件", "时间线", "章节摘要"], "章节正文")?;
-    validate_task_prompt(&settings.memory.system, &settings.memory.user_template,
-        &["章节ID", "章节正文", "角色档案", "伏笔档案"], "章节正文")
+    for task in prompt_tasks(settings) {
+        task.validate(task.label != "对标方案")?;
+    }
+    Ok(())
+}
+
+const CONSISTENCY_VARIABLES: &[&str] = &["章节ID", "章节正文", "事件骨架", "角色档案", "故事圣经", "伏笔档案", "历史事件", "时间线", "章节摘要"];
+const MEMORY_VARIABLES: &[&str] = &["章节ID", "章节正文", "角色档案", "伏笔档案"];
+
+struct PromptTaskSpec<'a> {
+    label: &'static str,
+    system: &'a str,
+    template: &'a str,
+    allowed: &'static [&'static str],
+    required: &'static str,
+}
+impl PromptTaskSpec<'_> {
+    fn validate(&self, complete: bool) -> Result<(), String> {
+        if complete && self.system.trim().is_empty() {
+            return Err(format!("{} → 系统提示词：不能为空", self.label));
+        }
+        let result = if complete {
+            validate_task_prompt(self.system, self.template, self.allowed, self.required)
+        } else { validate_prompt_variables(self.template, self.allowed, None) };
+        result.map_err(|error| format!("{} → 任务模板：{error}", self.label))
+    }
+}
+fn prompt_tasks(settings: &PromptSettings) -> [PromptTaskSpec<'_>; 5] {
+    [
+        PromptTaskSpec { label: "通用方案", system: &settings.system, template: &settings.user_template, allowed: GENERATION_VARIABLES, required: "事件骨架" },
+        PromptTaskSpec { label: "精简四段式", system: &settings.compact_generation.system, template: &settings.compact_generation.user_template, allowed: GENERATION_VARIABLES, required: "事件骨架" },
+        PromptTaskSpec { label: "对标方案", system: &settings.benchmark_generation.system, template: &settings.benchmark_generation.user_template, allowed: GENERATION_VARIABLES, required: "事件骨架" },
+        PromptTaskSpec { label: "一致性检查", system: &settings.consistency.system, template: &settings.consistency.user_template, allowed: CONSISTENCY_VARIABLES, required: "章节正文" },
+        PromptTaskSpec { label: "更新记忆", system: &settings.memory.system, template: &settings.memory.user_template, allowed: MEMORY_VARIABLES, required: "章节正文" },
+    ]
 }
 
 fn assemble_task_prompt(task: &TaskPrompt, values: &[(String, String)], settings: &Settings) -> Result<PromptPair, String> {
@@ -647,7 +696,13 @@ fn render_generation_template(template: &str, values: &[(String, String)]) -> Re
     let mut kept = String::new();
     for block in blocks {
         let names: Vec<_> = variable.captures_iter(&block).map(|c| c[1].trim().to_string()).collect();
-        if !names.is_empty() && names.iter().all(|n| values.iter().find(|(k, _)| k == n).map_or(true, |(_, v)| v.trim().is_empty())) { continue; }
+        let mut lines = block.lines();
+        let first = lines.next().unwrap_or("").trim();
+        let body = if first.starts_with('【') && first.find('】') == Some(first.len().saturating_sub('】'.len_utf8())) {
+            lines.collect::<Vec<_>>().join("\n")
+        } else { block.clone() };
+        let only_variables = variable.replace_all(&body, "").trim().is_empty();
+        if only_variables && !names.is_empty() && names.iter().all(|n| values.iter().find(|(k, _)| k == n).map_or(true, |(_, v)| v.trim().is_empty())) { continue; }
         kept.push_str(&block);
     }
     render_prompt_template(kept.trim(), values)
@@ -667,18 +722,15 @@ fn assemble_generation_prompt(
     target_words: u32, mem: &MemorySections, form_block: &str, preset: Option<GenerationPreset>,
 ) -> Result<PromptPreview, String> {
     let template = load_prompt_settings(project_dir)?;
-    validate_prompt_settings(&template)?;
     let preset = preset.unwrap_or(template.generation_preset);
+    let index = match preset { GenerationPreset::General => 0, GenerationPreset::Compact => 1, GenerationPreset::Benchmark => 2 };
+    prompt_tasks(&template)[index].validate(true)
+        .map_err(|error| if preset == GenerationPreset::Benchmark { format!("对标方案尚未配置完整：{error}") } else { error })?;
     let (system, user_template, material_guidance) = match preset {
         GenerationPreset::General => (&template.system, &template.user_template, template.general_material_guidance),
         GenerationPreset::Compact => (&template.compact_generation.system, &template.compact_generation.user_template, template.compact_material_guidance),
         GenerationPreset::Benchmark => (&template.benchmark_generation.system, &template.benchmark_generation.user_template, template.benchmark_material_guidance),
     };
-    if preset == GenerationPreset::Benchmark {
-        validate_task_prompt(system, user_template,
-            GENERATION_VARIABLES, "事件骨架")
-            .map_err(|error| format!("对标方案尚未配置完整：{error}；请先在提示词设置中完成对标模板"))?;
-    }
     let get = |k: &str| mem.sections.get(k).cloned().unwrap_or_default();
     let mut values = vec![
         ("角色档案".into(), get("Characters")),
@@ -1025,7 +1077,7 @@ fn write_generation_report(
 ```"#,
         chapter_id = chapter_id,
         idea = idea,
-        target_words = target_words,
+        target_words = if target_words == 0 { "由手动完整提示词决定".to_string() } else { target_words.to_string() },
         used_context = used_context,
         context_tokens = context_tokens,
         warning_text = warning_text,
@@ -1054,6 +1106,7 @@ fn do_generate_chapter(
     narrative: &str,
     prompt_override: Option<PromptOverride>,
     context_options: context::Options,
+    manual_prompts: Option<PromptPair>,
 ) -> CommandResult {
     let config = match build_run_config(app) {
         Ok(c) => c,
@@ -1073,6 +1126,12 @@ fn do_generate_chapter(
         };
     }
 
+    let (prompts, conflict_warnings) = if let Some(prompts) = manual_prompts {
+        match preview_manual_prompt(prompts, context_options.input_budget) {
+            Ok(preview) => (preview.prompts, Vec::new()),
+            Err(e) => return CommandResult { success: false, log: e },
+        }
+    } else {
     let (preview, mem) = match prepare_generation(&config.project_dir, &settings, chapter_id, idea,
         target_words, use_context, pov, narrative, &context_options) {
         Ok(p) => p, Err(e) => return CommandResult { success: false, log: e },
@@ -1081,17 +1140,20 @@ fn do_generate_chapter(
         Ok(p) => p,
         Err(e) => return CommandResult { success: false, log: e },
     };
-    let user_prompt = prompts.user;
-    let context_tokens = context::tokens(&prompts.system) + context::tokens(&user_prompt);
     let conflict_warnings = if use_context {
         detect_potential_conflicts(idea, &mem.conflict_sources)
     } else {
         Vec::new()
     };
+    (prompts, conflict_warnings)
+    };
+    let user_prompt = prompts.user;
+    let context_tokens = context::tokens(&prompts.system) + context::tokens(&user_prompt);
 
     let mut log = String::new();
     log.push_str(&format!("[信息] 章节: {}\n", chapter_id));
-    log.push_str(&format!("[信息] 目标长度: 约 {} 中文字\n", target_words));
+    if target_words == 0 { log.push_str("[信息] 目标长度: 由手动完整提示词决定\n"); }
+    else { log.push_str(&format!("[信息] 目标长度: 约 {} 中文字\n", target_words)); }
     log.push_str(&format!("[信息] 使用长期记忆: {}\n", use_context));
     log.push_str(&format!("[信息] prompt token 估算: ~{}\n", context_tokens));
 
@@ -1295,6 +1357,9 @@ fn do_check_consistency(app: &Context, chapter_id: &str) -> CommandResult {
         Ok(t) => t,
         Err(e) => return CommandResult { success: false, log: e },
     };
+    if let Err(error) = prompt_tasks(&templates)[3].validate(true) {
+        return CommandResult { success: false, log: error };
+    }
     let prompts = match assemble_task_prompt(&templates.consistency, &[
         ("章节ID".into(), chapter_id.into()), ("章节正文".into(), chapter_text.clone()),
         ("事件骨架".into(), chapter_idea), ("角色档案".into(), characters_text),
@@ -2333,6 +2398,9 @@ fn do_update_memory(app: &Context, chapter_id: &str) -> CommandResult {
         Ok(t) => t,
         Err(e) => return CommandResult { success: false, log: e },
     };
+    if let Err(error) = prompt_tasks(&templates)[4].validate(true) {
+        return CommandResult { success: false, log: error };
+    }
     let prompts = match assemble_task_prompt(&templates.memory, &[
         ("章节ID".into(), chapter_id.into()), ("章节正文".into(), chapter_text),
         ("角色档案".into(), characters_text), ("伏笔档案".into(), foreshadowing_text),
@@ -2789,6 +2857,78 @@ mod tests {
     }
 
     #[test]
+    fn literal_titles_and_fixed_text_survive_empty_materials() {
+        let values = vec![("角色档案".into(), String::new()), ("事件骨架".into(), "进入山谷".into())];
+        for template in [
+            "【人物状态】\n固定角色说明\n{{角色档案}}\n【本章】\n{{事件骨架}}",
+            "前置固定说明\n{{角色档案}}\n【本章】\n{{事件骨架}}",
+            "【人物状态】固定角色说明\n{{角色档案}}\n【本章】\n{{事件骨架}}",
+        ] {
+            let rendered = render_generation_template(template, &values).unwrap();
+            assert!(rendered.contains("固定"), "{rendered}");
+            assert!(rendered.contains("进入山谷"));
+        }
+        let literal = "【人物状态】\n【本章】\n{{事件骨架}}";
+        assert!(render_generation_template(literal, &values).unwrap().contains("【人物状态】"));
+        let empty = "【人物状态】\n{{角色档案}}\n【本章】\n{{事件骨架}}";
+        assert!(!render_generation_template(empty, &values).unwrap().contains("【人物状态】"));
+        let error = validate_prompt_variables("【人物状态】\n普通标题\n{{人物状态}}\n{{事件骨架}}", GENERATION_VARIABLES, None).unwrap_err();
+        assert!(error.contains("第 3 行"));
+        assert!(error.contains("{{角色档案}}"));
+    }
+
+    #[test]
+    fn manual_generation_sends_exact_messages_without_templates_or_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("book");
+        fs::create_dir_all(&root).unwrap();
+        let mut ctx = Context::new(dir.path().join("data"), Some(root.clone())).unwrap();
+        fs::write(root.join(".prompt-settings.json"), "invalid template settings").unwrap();
+        fs::create_dir_all(root.join("memory")).unwrap();
+        fs::write(root.join("memory/characters.yaml"), "invalid: [").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        ctx.settings.llm_base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        ctx.settings.llm_model = "manual-test".into();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+            let mut bytes = Vec::new();
+            let mut buf = [0u8; 4096];
+            let (split, length) = loop {
+                let n = stream.read(&mut buf).unwrap();
+                assert!(n > 0);
+                bytes.extend_from_slice(&buf[..n]);
+                if let Some(index) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let header = String::from_utf8_lossy(&bytes[..index]).to_lowercase();
+                    let length = header.lines().find_map(|line| line.strip_prefix("content-length:")).unwrap().trim().parse::<usize>().unwrap();
+                    break (index + 4, length);
+                }
+            };
+            while bytes.len() < split + length {
+                let n = stream.read(&mut buf).unwrap(); assert!(n > 0); bytes.extend_from_slice(&buf[..n]);
+            }
+            let request: serde_json::Value = serde_json::from_slice(&bytes[split..split + length]).unwrap();
+            let body = json!({"choices":[{"message":{"content":"手动生成的正文。"}}]}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            request
+        });
+        let prompts = PromptPair { system: "自定系统\n".into(), user: "  【人物状态】\n{{人物状态}} {{未知变量}}\n请直接写正文。\n".into() };
+        let result = generate_manual_chapter(ctx.clone(), "ch001".into(), prompts.clone(), false, 100000).unwrap();
+        assert!(result.success, "{}", result.log);
+        let request = server.join().unwrap();
+        assert_eq!(request["messages"][0]["content"], prompts.system);
+        assert_eq!(request["messages"][1]["content"], prompts.user);
+        let chapter = project_source::chapter_path(&root, "ch001").unwrap();
+        assert_eq!(fs::read_to_string(&chapter).unwrap(), "手动生成的正文。");
+        let blocked = generate_manual_chapter(ctx, "ch001".into(), prompts, false, 100000).unwrap();
+        assert!(!blocked.success);
+        assert_eq!(fs::read_to_string(chapter).unwrap(), "手动生成的正文。");
+        assert!(preview_manual_prompt(PromptPair { system: String::new(), user: "正文要求".into() }, 500).is_ok());
+        assert!(preview_manual_prompt(PromptPair { system: "系统".into(), user: "  ".into() }, 500).is_err());
+        assert!(preview_manual_prompt(PromptPair { system: String::new(), user: "长".repeat(501) }, 500).is_err());
+    }
+
+    #[test]
     fn removed_variable_names_are_rejected_without_migration() {
         for name in ["人物状态", "前情", "相关设定与伏笔", "世界观规则", "近期事件", "伏笔"] {
             let mut template = PromptSettings::default();
@@ -3192,7 +3332,16 @@ pub fn generate_chapter(app: Context, chapter_id: String, idea: String, target_w
     let _access = app.operation_access()?;
     app.stage("准备上下文")?;
     Ok(do_generate_chapter(&app, &chapter_id, &idea, target_words, use_context, overwrite,
-        &pov.unwrap_or_default(), &narrative.unwrap_or_default(), prompt_override, context_options.unwrap_or_default()))
+        &pov.unwrap_or_default(), &narrative.unwrap_or_default(), prompt_override, context_options.unwrap_or_default(), None))
+}
+pub fn generate_manual_chapter(app: Context, chapter_id: String, prompts: PromptPair,
+    overwrite: bool, input_budget: usize) -> Result<CommandResult, String> {
+    let chapter_id = canonical_chapter_id(&chapter_id)?;
+    preview_manual_prompt(prompts.clone(), input_budget)?;
+    let _access = app.operation_access()?;
+    app.stage("准备手动完整提示词")?;
+    Ok(do_generate_chapter(&app, &chapter_id, "手动完整提示词", 0, false, overwrite,
+        "", "", None, context::Options { input_budget, ..Default::default() }, Some(prompts)))
 }
 pub fn check_consistency(app: Context, chapter_id: String) -> Result<CommandResult, String> {
     let chapter_id = canonical_chapter_id(&chapter_id)?;
@@ -3239,10 +3388,14 @@ pub fn save_memory_checked(app: Context, rel: String, content: String, expected:
 pub fn save_prompt_checked(app: Context, settings: PromptSettings, expected: serde_json::Value) -> Result<(), String> {
     let _access = app.write_access()?;
     let current = load_prompt_settings(&app.project_dir)?;
-    if serde_json::to_value(current).map_err(|e| e.to_string())? != expected {
+    if serde_json::to_value(&current).map_err(|e| e.to_string())? != expected {
         return Err("内容冲突：提示词已变更，请重新加载".into());
     }
-    validate_prompt_settings(&settings)?;
+    // Check only edited template fields. Untouched legacy drafts must not prevent
+    // repairing another field, switching presets or changing guidance options.
+    for (before, after) in prompt_tasks(&current).iter().zip(prompt_tasks(&settings)) {
+        if before.template != after.template { after.validate(false)?; }
+    }
     project_manager::atomic_json(&app.project_dir.join(".prompt-settings.json"), &settings)
 }
 

@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { ReactNode, useEffect, useRef, useState } from "react";
 import { api, ChapterDetails, CommandResult, PromptPreview, ContextOptions, ContextCatalog, defaultContextOptions, GenerationPreset } from "../api";
+import Icon from "./Icon";
+import ChapterDirectory from "./ChapterDirectory";
 import ChapterTitlePanel from "./ChapterTitlePanel";
 import { useT } from "../i18n";
 import ContextControls, { ContextReport, estimateTokens } from "./ContextControls";
@@ -7,6 +9,9 @@ import { Banner, Field, LogBox, Spinner } from "./common";
 import { useProjectActivity } from "../projectActivity";
 
 interface Props {
+  focusMode: boolean;
+  onFocusChange: (focus: boolean) => void;
+  projectSwitcher: ReactNode;
   promptRevision: number;
   chapters: string[];
   chapterDetails: ChapterDetails[];
@@ -17,9 +22,13 @@ interface Props {
   refreshChapters: () => Promise<void>;
 }
 
+interface ManualDraft { system: string; user: string; budget: number; }
+const emptyManualDraft: ManualDraft = { system: "", user: "", budget: 100000 };
+
 type Busy = "" | "generate" | "consistency" | "memory" | "reset" | "save" | "preview";
 
 export default function ChapterWorkbench({
+  focusMode, onFocusChange, projectSwitcher,
   chapters,
   chapterDetails,
   projectRoot,
@@ -30,6 +39,36 @@ export default function ChapterWorkbench({
   refreshChapters,
 }: Props) {
   const t = useT();
+  const [directoryOpen, setDirectoryOpen] = useState(true);
+  const [aiOpen, setAiOpen] = useState(() => !window.matchMedia("(max-width: 1099px)").matches);
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 1099px)").matches);
+  const aiToggleRef = useRef<HTMLButtonElement>(null);
+  const assistantRef = useRef<HTMLElement>(null);
+  const aiCloseRef = useRef<HTMLButtonElement>(null);
+  const narrowViewport = useRef(window.matchMedia("(max-width: 1099px)"));
+  useEffect(() => {
+    const media = narrowViewport.current;
+    const update = () => { setNarrow(media.matches); setAiOpen(!media.matches); };
+    update(); media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  function closeAi() { setAiOpen(false); requestAnimationFrame(() => aiToggleRef.current?.focus()); }
+  useEffect(() => {
+    if (aiOpen && narrowViewport.current.matches) aiCloseRef.current?.focus();
+  }, [aiOpen]);
+  useEffect(() => {
+    if (!aiOpen || !narrow || focusMode) return;
+    const keepFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab" || document.querySelector("dialog[open]")) return;
+      const nodes = Array.from(assistantRef.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]') ?? []).filter((node) => node.getClientRects().length > 0);
+      const first = nodes[0], last = nodes[nodes.length - 1];
+      if (!first) return;
+      if (event.shiftKey && (document.activeElement === first || !assistantRef.current?.contains(document.activeElement))) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && (document.activeElement === last || !assistantRef.current?.contains(document.activeElement))) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", keepFocus);
+    return () => document.removeEventListener("keydown", keepFocus);
+  }, [aiOpen, narrow, focusMode]);
   const [contextOptions, setContextOptions] = useState<ContextOptions>({ ...defaultContextOptions });
   const [projectPreset, setProjectPreset] = useState<GenerationPreset>("general");
   const [catalog, setCatalog] = useState<ContextCatalog | null>(null);
@@ -85,6 +124,38 @@ export default function ChapterWorkbench({
     } finally { setBusy(""); }
   }
 
+  async function onGenerateManual() {
+    const id = (currentChapter || newId).trim();
+    if (!id) {
+      setBanner({ kind: "err", msg: t("wb.needChapter") });
+      return;
+    }
+    if (!manualUser.trim()) {
+      setBanner({ kind: "err", msg: t("wb.needManual") });
+      return;
+    }
+    setBusy("generate");
+    setBanner({ kind: "info", msg: t("wb.manualGenRunning") });
+    try {
+      const res = await api.generateChapterManual(id, { system: manualSystem, user: manualUser }, overwrite, manualDraft.budget);
+      handleResult(res, t("wb.genOk", { id }));
+      if (res.success) {
+        await refreshChapters();
+        setCurrentChapter(id);
+        await loadContent(id);
+      }
+    } catch (e) {
+      setBanner({ kind: "err", msg: String(e) });
+    } finally {
+      setBusy("");
+    }
+  }
+
+  function clearManual() {
+    if (!window.confirm(t("wb.manualClearConfirm"))) return;
+    setManualDraft(emptyManualDraft);
+  }
+
   function closePreview() {
     dialogRef.current?.close();
     setDraftPrompt(null);
@@ -105,6 +176,19 @@ export default function ChapterWorkbench({
     return povMode; // "" | "objective" | "omniscient"
   }
 
+  const [generationMode, setGenerationMode] = useState<"template" | "manual">("template");
+  const [manualDrafts, setManualDrafts] = useState<Record<string, ManualDraft>>({});
+  const manualKey = JSON.stringify([projectRoot, (currentChapter || newId).trim()]);
+  const manualDraft = manualDrafts[manualKey] ?? emptyManualDraft;
+  const manualSystem = manualDraft.system;
+  const manualUser = manualDraft.user;
+  const manualTokens = estimateTokens(manualSystem) + estimateTokens(manualUser);
+  const manualBudgetValid = Number.isInteger(manualDraft.budget) && manualDraft.budget >= 500 && manualDraft.budget <= 100000;
+  const manualOverBudget = manualTokens > manualDraft.budget;
+  function setManualDraft(patch: Partial<ManualDraft>) {
+    setManualDrafts((drafts) => ({ ...drafts, [manualKey]: { ...(drafts[manualKey] ?? emptyManualDraft), ...patch } }));
+  }
+
   const [content, setContent] = useState("");
   const savedContent = useRef("");
   const [dirty, setDirty] = useState(false);
@@ -114,7 +198,7 @@ export default function ChapterWorkbench({
   const [loadingChapter, setLoadingChapter] = useState(false);
   const [sourceRevision, setSourceRevision] = useState(0);
   const loadRevision = useRef(0);
-  useProjectActivity("workbench", dirty || !!idea.trim() || !!newId.trim() || !!narrative.trim() || !!draftPrompt, busy !== "" || loadingChapter);
+  useProjectActivity("workbench", dirty || !!idea.trim() || !!newId.trim() || !!narrative.trim() || !!draftPrompt || Object.values(manualDrafts).some((d) => !!d.system || !!d.user), busy !== "" || loadingChapter);
   const [log, setLog] = useState("");
   const [banner, setBanner] = useState<{ kind: "ok" | "err" | "info"; msg: string } | null>(null);
 
@@ -270,34 +354,32 @@ export default function ChapterWorkbench({
   const currentDetails = chapterDetails.find((chapter) => chapter.id === currentChapter);
 
   return (
-    <div className="workbench">
-      <div className="panel">
-        <h2>{t("wb.chapter")}</h2>
-        <div className="row">
-          <Field label={t("wb.selectChapter")}>
-            <select value={currentChapter} disabled={running} onChange={(e) => selectChapter(e.target.value)}>
-              <option value="">{t("wb.none")}</option>
-              {chapters.map((c) => (
-                <option key={c} value={c}>
-                  {t("ct.chapter", { number: Number(c.slice(2)) })}{chapterDetails.find((chapter) => chapter.id === c)?.title ? ` · ${chapterDetails.find((chapter) => chapter.id === c)?.title}` : ""}
-                </option>
-              ))}
-            </select>
-          </Field>
-          <Field label={t("wb.newId")} hint={t("wb.newIdHint")}>
-            <div className="inline">
-              <input
-                value={newId}
-                placeholder={t("wb.newIdPlaceholder")}
-                onChange={(e) => setNewId(e.target.value)}
-              />
-              <button type="button" className="ghost" onClick={() => setNewId(nextChapterId())}>
-                {t("wb.autoNumber")}
-              </button>
-            </div>
-          </Field>
-        </div>
-
+    <div className={`workbench${directoryOpen ? "" : " directory-collapsed"}${aiOpen ? "" : " ai-collapsed"}`}>
+      <div className="workspace-toolbar" inert={narrow && aiOpen && !focusMode}>
+        <button className="icon-button" title={t("ui.toggleDirectory")} aria-label={t("ui.toggleDirectory")} aria-expanded={directoryOpen} onClick={() => setDirectoryOpen(!directoryOpen)}><Icon name="panel" /></button>
+        <span className="workspace-caption">{t("nav.workbench")}</span>
+        <span className="spacer" />
+        <button className="ghost" aria-pressed={focusMode} onClick={() => onFocusChange(!focusMode)}><Icon name="focus" />{t(focusMode ? "ui.exitFocus" : "ui.focus")}</button>
+        <button ref={aiToggleRef} className={aiOpen ? "assistant-toggle selected" : "assistant-toggle"} aria-expanded={aiOpen} onClick={() => setAiOpen(!aiOpen)}><Icon name="spark" />{t("ui.ai")}</button>
+      </div>
+      <ChapterDirectory open={directoryOpen} inert={narrow && aiOpen && !focusMode} running={running}
+        projectSwitcher={projectSwitcher} chapters={chapters} chapterDetails={chapterDetails}
+        currentChapter={currentChapter} selectChapter={selectChapter} newId={newId} setNewId={setNewId}
+        nextChapterId={nextChapterId} onStartNew={() => { selectChapter(""); setAiOpen(true); }} />
+      {aiOpen && <button className="assistant-scrim" aria-label={t("ui.close")} onClick={closeAi} />}
+      <aside ref={assistantRef} role={narrow ? "dialog" : undefined} aria-modal={narrow ? true : undefined} className="assistant-panel" hidden={!aiOpen} aria-label={t("ui.ai")} onKeyDown={(e) => { if (e.key === "Escape") { e.preventDefault(); closeAi(); } }}>
+        <div className="assistant-heading"><div><span className="eyebrow">SODARIE</span><h2><Icon name="spark" />{t("ui.ai")}</h2></div><button ref={aiCloseRef} className="icon-button" aria-label={t("ui.close")} onClick={closeAi}><Icon name="close" /></button></div>
+        <p className="assistant-intro">{t("ui.aiHint")}</p>
+        <div className="generation-scroll">
+        <div className="target-chapter">{currentDetails?.title || currentChapter || newId || t("ui.newChapter")}</div>
+        <Field label={t("wb.generationMode")}>
+          <select value={generationMode} disabled={running} onChange={(e) => setGenerationMode(e.target.value as "template" | "manual")}>
+            <option value="template">{t("wb.modeTemplate")}</option>
+            <option value="manual">{t("wb.modeManual")}</option>
+          </select>
+        </Field>
+        <fieldset className="generation-fields" disabled={running}>
+        {generationMode === "template" ? <>
         <Field label={t("wb.idea")}>
           <textarea
             className="idea"
@@ -322,13 +404,10 @@ export default function ChapterWorkbench({
               <input type="checkbox" checked={useContext} onChange={(e) => setUseContext(e.target.checked)} />
               {t("wb.useContext")}
             </label>
-            <label>
-              <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
-              {t("wb.overwrite")}
-            </label>
           </div>
         </div>
 
+        <details className="generation-options"><summary>{t("ui.advanced")}</summary>
         <Field label={t("pr.chapterPreset")} hint={t("pr.chapterPresetHint")}>
           <select disabled={running} value={contextOptions.generation_preset ?? ""}
             onChange={(e) => setContextOptions((o) => ({ ...o, generation_preset: (e.target.value || null) as GenerationPreset | null }))}>
@@ -370,19 +449,66 @@ export default function ChapterWorkbench({
             />
           </Field>
         </details>
+        </details>
 
-        <div className="prompt-status muted">{t(confirmedPrompt ? "pr.manual" : "pr.auto")}</div>
-        {promptStale ? <Banner kind="info">{t("pr.stale")}</Banner> : null}
-        <div className="actions wrap">
-          <button onClick={onPreview} disabled={running}>{busy === "preview" ? <Spinner /> : null}{t("pr.preview")}</button>
-          {confirmedPrompt ? <button disabled={running} onClick={() => setConfirmedPrompt(undefined)}>{t("pr.resetAuto")}</button> : null}
-          <button className="primary" onClick={onGenerate} disabled={running}>
-            {busy === "generate" ? <Spinner /> : null} {t("wb.generate")}
-          </button>
+        </> : <div className="manual-prompt-editor">
+          <h3>{t("wb.modeManual")}</h3>
+          <p className="muted">{t("wb.manualHint")}</p>
+          <Field label={t("wb.manualSystem")}>
+            <textarea
+              className="prompt-system"
+              value={manualSystem}
+              placeholder={t("wb.manualSystem")}
+              onChange={(e) => setManualDraft({ system: e.target.value })}
+            />
+          </Field>
+          <Field label={t("wb.manualUser")}>
+            <textarea
+              className="prompt-user"
+              value={manualUser}
+              placeholder={t("wb.manualUser")}
+              onChange={(e) => setManualDraft({ user: e.target.value })}
+            />
+          </Field>
+          <Field label={t("cx.budget")} hint={t("wb.manualBudgetHint")}>
+            <input type="number" min={500} max={100000} step={500} value={manualDraft.budget || ""}
+              onChange={(e) => setManualDraft({ budget: Number(e.target.value) })} />
+          </Field>
+          <p className="muted">{t("cx.length")}: {Array.from(manualSystem + manualUser).length} {t("wb.words")} · ≈ {manualTokens} tokens / {manualDraft.budget}</p>
+          <p className="field-hint">{t("wb.manualDraftHint")}</p>
+          {!manualBudgetValid ? <Banner kind="err">{t("wb.manualBudgetHint")}</Banner> : null}
+          {manualOverBudget ? <Banner kind="err">{t("cx.overBudget")}</Banner> : null}
+        </div>}
+        <label className="check-row">
+          <input type="checkbox" checked={overwrite} onChange={(e) => setOverwrite(e.target.checked)} />
+          {t("wb.overwrite")}
+        </label>
+        </fieldset>
         </div>
-      </div>
+        <div className="generation-footer">
+        {generationMode === "template" ? <>
+          <div className="prompt-status muted">{t(confirmedPrompt ? "pr.manual" : "pr.auto")}</div>
+          {promptStale ? <Banner kind="info">{t("pr.stale")}</Banner> : null}
+          <div className="actions wrap">
+            <button onClick={onPreview} disabled={running}>{busy === "preview" ? <Spinner /> : null}{t("pr.preview")}</button>
+            {confirmedPrompt ? <button disabled={running} onClick={() => setConfirmedPrompt(undefined)}>{t("pr.resetAuto")}</button> : null}
+            <button className="primary" onClick={onGenerate} disabled={running}>
+              {busy === "generate" ? <Spinner /> : null} {t("wb.generate")}
+            </button>
+          </div>
+        </> : <div className="actions wrap">
+          <button className="primary" onClick={onGenerateManual} disabled={running || !manualUser.trim() || !manualBudgetValid || manualOverBudget}>
+            {busy === "generate" ? <Spinner /> : null} {t("wb.manualGenerate")}
+          </button>
+          <button className="ghost" onClick={clearManual} disabled={running || (!manualSystem && !manualUser)}>{t("wb.manualClear")}</button>
+        </div>}
+        {banner ? <Banner kind={banner.kind}>{banner.msg}</Banner> : null}
+        <LogBox log={log} />
+        </div>
+      </aside>
 
-      <div className="panel">
+      <section inert={narrow && aiOpen && !focusMode} className="manuscript" aria-label={t("wb.bodyTitle")}>
+        <details className="title-editor" hidden={!currentDetails}><summary>{t("ui.titleEdit")}</summary>
         {currentDetails && <ChapterTitlePanel key={currentChapter} chapter={currentDetails} projectRoot={projectRoot}
           content={loadingChapter ? "" : content} disabled={busy !== "" || loadingChapter} onBusyChange={setTitleBusy}
           onSaved={async () => {
@@ -391,19 +517,24 @@ export default function ChapterWorkbench({
             setSourceRevision((n) => n + 1);
             setCatalog(await api.contextCatalog(currentChapter));
           }} />}
-        <div className="panel-head">
+        </details>
+        <div className="panel-head manuscript-heading">
           <h2>
-            {t("wb.bodyTitle")} {currentChapter ? `· ${currentChapter}` : ""}
+            <span className="eyebrow">{currentChapter || "MANUSCRIPT"}</span>
+            <span className="manuscript-title">{currentDetails?.title || t("wb.bodyTitle")}</span>
           </h2>
           <div className="panel-actions">
-            <button onClick={onSave} disabled={!currentChapter || running || !dirty}>
+            <span className={`save-state${dirty ? " is-dirty" : ""}`} role="status">{currentChapter ? t(dirty ? "ui.unsaved" : "ui.saved") : ""}</span>
+            <button className="primary" onClick={onSave} disabled={!currentChapter || running || !dirty}>
               {busy === "save" ? <Spinner /> : null} {t("wb.save")}
               {dirty ? " *" : ""}
             </button>
           </div>
         </div>
-        {catalog ? <p className="muted source-path">{t("cx.source")}: {catalog.chapter_file}</p> : null}
+        {!currentChapter && <div className="manuscript-empty"><Icon name="workbench" /><h2>{t("ui.welcome")}</h2><p>{t("ui.welcomeHint")}</p></div>}
         <textarea
+          aria-label={t("wb.bodyTitle")}
+          hidden={!currentChapter}
           className="chapter-body"
           value={content}
           placeholder={currentChapter ? t("wb.bodyHas") : t("wb.bodyNone")}
@@ -413,10 +544,13 @@ export default function ChapterWorkbench({
           }}
           disabled={!currentChapter || loadingChapter || busy === "generate" || busy === "save" || busy === "reset"}
         />
+        {(!aiOpen || focusMode) && banner && <Banner kind={banner.kind}>{banner.msg}</Banner>}
+        {loadingChapter && <span role="status" className="muted">{t("ui.loading")}</span>}
         <div className="wordcount">
-          {content.length} {t("wb.words")}
+          {Array.from(content).length} {t("wb.words")}
         </div>
 
+        <details className="chapter-tools"><summary>{t("ui.tools")}</summary>
         <div className="actions wrap">
           <button onClick={onCheck} disabled={!currentChapter || running}>
             {busy === "consistency" ? <Spinner /> : null} {t("wb.check")}
@@ -424,7 +558,8 @@ export default function ChapterWorkbench({
           <button onClick={onUpdateMemory} disabled={!currentChapter || running}>
             {busy === "memory" ? <Spinner /> : null} {t("wb.updateMemory")}
           </button>
-          <span className="spacer" />
+        </div>
+        <details className="danger-zone"><summary>{t("ui.danger")}</summary><div className="actions wrap">
           <label className="danger-check">
             <input type="checkbox" checked={includeMemory} onChange={(e) => setIncludeMemory(e.target.checked)} />
             {t("wb.includeMemory")}
@@ -433,10 +568,9 @@ export default function ChapterWorkbench({
             {busy === "reset" ? <Spinner /> : null} {t("wb.reset")}
           </button>
         </div>
-      </div>
+        </details></details>
+      </section>
 
-      {banner ? <Banner kind={banner.kind}>{banner.msg}</Banner> : null}
-      <LogBox log={log} />
       <dialog ref={dialogRef} className="prompt-dialog" aria-labelledby="prompt-dialog-title"
         onCancel={() => { setDraftPrompt(null); setFreshPrompt(null); }}>
         {draftPrompt ? <>
