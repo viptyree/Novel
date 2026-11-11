@@ -59,9 +59,14 @@ pub struct Status {
     pub error: Option<String>,
 }
 impl Status {
-    fn active(&self) -> bool {
+    pub(crate) fn active(&self) -> bool {
         matches!(self.state.as_str(), "starting" | "running")
     }
+}
+pub(crate) fn action(data: &Path, id: &str) -> Result<Action> {
+    let request: Request = serde_json::from_str(&read(&directory(data, id)?.join("request.json"))?)
+        .map_err(|e| e.to_string())?;
+    Ok(request.action)
 }
 fn directory(data: &Path, id: &str) -> Result<PathBuf> {
     uuid::Uuid::parse_str(id).map_err(|_| "无效任务 ID".to_string())?;

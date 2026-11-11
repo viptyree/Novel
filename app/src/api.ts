@@ -17,13 +17,15 @@ export interface Settings {
   llm_provider?: LlmProvider;
 }
 
-export type GenerationPreset = "general" | "compact";
+export type GenerationPreset = "general" | "compact" | "benchmark";
 export interface TaskPrompt { system: string; user_template: string; }
 export interface PromptSettings extends TaskPrompt {
   generation_preset: GenerationPreset;
   compact_generation: TaskPrompt;
+  benchmark_generation: TaskPrompt;
   general_material_guidance: boolean;
   compact_material_guidance: boolean;
+  benchmark_material_guidance: boolean;
   consistency: TaskPrompt; memory: TaskPrompt;
 }
 export interface PromptPair { system: string; user: string; }

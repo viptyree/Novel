@@ -417,9 +417,11 @@ pub enum GenerationPreset {
     #[default]
     General,
     Compact,
+    Benchmark,
 }
 
 fn default_material_guidance() -> bool { true }
+fn default_benchmark_material_guidance() -> bool { false }
 fn default_compact_generation() -> TaskPrompt {
     TaskPrompt {
         system: DEFAULT_SYSTEM_PROMPT.into(),
@@ -454,6 +456,10 @@ pub struct PromptSettings {
     pub general_material_guidance: bool,
     #[serde(default)]
     pub compact_material_guidance: bool,
+    #[serde(default = "default_benchmark_material_guidance")]
+    pub benchmark_material_guidance: bool,
+    #[serde(default)]
+    pub benchmark_generation: TaskPrompt,
     pub system: String,
     pub user_template: String,
     #[serde(default = "default_consistency_prompt")]
@@ -462,7 +468,7 @@ pub struct PromptSettings {
     pub memory: TaskPrompt,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct TaskPrompt {
     pub system: String,
     pub user_template: String,
@@ -498,6 +504,7 @@ impl Default for PromptSettings {
     fn default() -> Self {
         Self { generation_preset: GenerationPreset::General,
             compact_generation: default_compact_generation(), general_material_guidance: true, compact_material_guidance: false,
+            benchmark_material_guidance: false, benchmark_generation: TaskPrompt::default(),
             system: DEFAULT_SYSTEM_PROMPT.into(), user_template: DEFAULT_USER_TEMPLATE.into(),
             consistency: default_consistency_prompt(), memory: default_memory_prompt() }
     }
@@ -557,15 +564,21 @@ fn validate_task_prompt(system: &str, template: &str, allowed: &[&str], required
     if system.trim().is_empty() || template.trim().is_empty() {
         return Err("系统提示词和任务提示词模板不能为空".into());
     }
+    validate_prompt_variables(template, allowed, Some(required))
+}
+
+fn validate_prompt_variables(template: &str, allowed: &[&str], required: Option<&str>) -> Result<(), String> {
     render_prompt_template(template, &[])?;
     let re = regex::Regex::new(r"\{\{([^{}]+)\}\}").unwrap();
     let mut has_required = false;
     for caps in re.captures_iter(template) {
         let name = caps[1].trim();
         if !allowed.contains(&name) { return Err(format!("当前分类不支持变量: {}", name)); }
-        has_required |= name == required;
+        has_required |= Some(name) == required;
     }
-    if !has_required { return Err(format!("模板必须包含 {{{{{}}}}}", required)); }
+    if let Some(required) = required {
+        if !has_required { return Err(format!("模板必须包含 {{{{{}}}}}", required)); }
+    }
     Ok(())
 }
 
@@ -574,6 +587,9 @@ fn validate_prompt_settings(settings: &PromptSettings) -> Result<(), String> {
         &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], "事件骨架")?;
     validate_task_prompt(&settings.compact_generation.system, &settings.compact_generation.user_template,
         &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], "事件骨架")?;
+    // Benchmark is an author-owned draft: each field can be saved independently.
+    validate_prompt_variables(&settings.benchmark_generation.user_template,
+        &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], None)?;
     validate_task_prompt(&settings.consistency.system, &settings.consistency.user_template,
         &["章节ID", "章节正文", "事件骨架", "人物状态", "世界观规则", "伏笔", "近期事件", "时间线"], "章节正文")?;
     validate_task_prompt(&settings.memory.system, &settings.memory.user_template,
@@ -620,7 +636,13 @@ fn assemble_generation_prompt(
     let (system, user_template, material_guidance) = match preset {
         GenerationPreset::General => (&template.system, &template.user_template, template.general_material_guidance),
         GenerationPreset::Compact => (&template.compact_generation.system, &template.compact_generation.user_template, template.compact_material_guidance),
+        GenerationPreset::Benchmark => (&template.benchmark_generation.system, &template.benchmark_generation.user_template, template.benchmark_material_guidance),
     };
+    if preset == GenerationPreset::Benchmark {
+        validate_task_prompt(system, user_template,
+            &["人物状态", "前情", "相关设定与伏笔", "文风参考", "事件骨架", "目标字数", "叙事要求", "章节ID"], "事件骨架")
+            .map_err(|error| format!("对标方案尚未配置完整：{error}；请先在提示词设置中完成对标模板"))?;
+    }
     let get = |k: &str| mem.sections.get(k).cloned().unwrap_or_default();
     let combine = |parts: Vec<(&str, String)>| parts.into_iter().filter(|(_, s)| !s.trim().is_empty())
         .map(|(name, text)| format!("{}：\n{}", name, text)).collect::<Vec<_>>().join("\n\n");
@@ -2771,6 +2793,9 @@ mod tests {
         assert!(!old.compact_material_guidance);
         assert_eq!(old.system, "原有系统");
         assert_eq!(old.compact_generation, default_compact_generation());
+        assert_eq!(old.benchmark_generation, TaskPrompt::default());
+        assert!(!old.benchmark_material_guidance);
+        assert!(validate_prompt_settings(&old).is_ok());
         let mut next = old.clone();
         next.generation_preset = GenerationPreset::Compact;
         next.compact_generation.system = "独立的精简系统".into();

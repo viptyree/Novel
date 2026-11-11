@@ -335,6 +335,7 @@ export default function ChapterWorkbench({
             <option value="">{t("pr.followDefault")} · {t(`pr.${projectPreset}`)}</option>
             <option value="general">{t("pr.general")}</option>
             <option value="compact">{t("pr.compact")}</option>
+            <option value="benchmark">{t("pr.benchmark")}</option>
           </select>
         </Field>
 

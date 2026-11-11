@@ -95,25 +95,29 @@ enum ChapterPurpose {
     Context,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PromptCategory { General, Compact, Consistency, Memory }
+enum PromptCategory { General, Compact, Benchmark, Consistency, Memory }
 impl PromptCategory {
     fn label(self) -> &'static str { match self {
-        Self::General => "通用方案", Self::Compact => "精简四段式",
+        Self::General => "通用方案", Self::Compact => "精简四段式", Self::Benchmark => "对标方案",
         Self::Consistency => "一致性检查", Self::Memory => "更新记忆",
     } }
     fn task(self, settings: &core::PromptSettings) -> core::TaskPrompt { match self {
         Self::General => core::TaskPrompt { system: settings.system.clone(), user_template: settings.user_template.clone() },
-        Self::Compact => settings.compact_generation.clone(), Self::Consistency => settings.consistency.clone(), Self::Memory => settings.memory.clone(),
+        Self::Compact => settings.compact_generation.clone(), Self::Benchmark => settings.benchmark_generation.clone(),
+        Self::Consistency => settings.consistency.clone(), Self::Memory => settings.memory.clone(),
     } }
     fn replace(self, settings: &mut core::PromptSettings, task: core::TaskPrompt) { match self {
         Self::General => { settings.system = task.system; settings.user_template = task.user_template; },
-        Self::Compact => settings.compact_generation = task, Self::Consistency => settings.consistency = task, Self::Memory => settings.memory = task,
+        Self::Compact => settings.compact_generation = task, Self::Benchmark => settings.benchmark_generation = task,
+        Self::Consistency => settings.consistency = task, Self::Memory => settings.memory = task,
     } }
     fn guidance(self, settings: &core::PromptSettings) -> Option<bool> { match self {
-        Self::General => Some(settings.general_material_guidance), Self::Compact => Some(settings.compact_material_guidance), _ => None,
+        Self::General => Some(settings.general_material_guidance), Self::Compact => Some(settings.compact_material_guidance),
+        Self::Benchmark => Some(settings.benchmark_material_guidance), _ => None,
     } }
     fn set_guidance(self, settings: &mut core::PromptSettings, enabled: bool) { match self {
-        Self::General => settings.general_material_guidance = enabled, Self::Compact => settings.compact_material_guidance = enabled, _ => {},
+        Self::General => settings.general_material_guidance = enabled, Self::Compact => settings.compact_material_guidance = enabled,
+        Self::Benchmark => settings.benchmark_material_guidance = enabled, _ => {},
     } }
 }
 fn save_template_field(ctx: &Context, category: PromptCategory, system: bool, expected: &str, text: &str) -> Result<()> {
@@ -428,6 +432,9 @@ fn confirm(path: &str, label: &str, plain: bool, no_color: bool) -> Result<Choic
     }
 }
 fn viewer(path: &str, text: &str, plain: bool) -> Result<Nav> {
+    viewer_at(path, text, plain, &mut 0)
+}
+fn viewer_at(path: &str, text: &str, plain: bool, saved_offset: &mut u16) -> Result<Nav> {
     if plain {
         println!("\n{path}\n{text}");
         return Ok(
@@ -439,16 +446,20 @@ fn viewer(path: &str, text: &str, plain: bool) -> Result<Nav> {
         );
     }
     let mut session = Session::new()?;
-    let mut offset = 0u16;
+    let mut offset = *saved_offset;
     loop {
+        let size = session.terminal.size().map_err(|e| e.to_string())?;
+        let [_, body, _] = regions(Rect::new(0, 0, size.width, size.height));
+        let (lines, _) = layout(&text.chars().collect::<Vec<_>>(), body.width.saturating_sub(2).max(1) as usize, false);
+        offset = offset.min(lines.len().saturating_sub(body.height.saturating_sub(2) as usize).min(u16::MAX as usize) as u16);
+        *saved_offset = offset;
         session
             .terminal
             .draw(|f| {
                 let [header, body, footer] = regions(f.area());
                 f.render_widget(Paragraph::new(short_path(path, header.width)), header);
                 f.render_widget(
-                    Paragraph::new(text)
-                        .wrap(Wrap { trim: false })
+                    Paragraph::new(lines.join("\n"))
                         .scroll((offset, 0))
                         .block(Block::default().borders(Borders::ALL)),
                     body,
@@ -568,7 +579,11 @@ fn validate_preview(ctx: &Context, id: &str, draft: &GenerationDraft, edited: &c
     })).map(|_| ())
 }
 fn preset_label(preset: core::GenerationPreset) -> &'static str {
-    if preset == core::GenerationPreset::Compact { "精简四段式" } else { "通用方案" }
+    match preset {
+        core::GenerationPreset::General => "通用方案",
+        core::GenerationPreset::Compact => "精简四段式",
+        core::GenerationPreset::Benchmark => "对标方案",
+    }
 }
 
 struct App {
@@ -578,6 +593,7 @@ struct App {
     nav: Navigation,
     keys: Vec<String>,
     drafts: std::collections::HashMap<(std::path::PathBuf, String), GenerationDraft>,
+    reading: std::collections::HashMap<(std::path::PathBuf, String), u16>,
 }
 enum Effect {
     Stay,
@@ -617,6 +633,10 @@ impl App {
         )
     }
     fn execute(&mut self, args: Vec<String>) -> Result<Effect> {
+        let reading = if args.first().map(String::as_str) == Some("chapter")
+            && args.get(1).map(String::as_str) == Some("show") {
+            args.get(2).cloned()
+        } else { None };
         let switch = args.first().map(String::as_str) == Some("project")
             && matches!(
                 args.get(1).map(String::as_str),
@@ -627,6 +647,9 @@ impl App {
         let cli = Cli::try_parse_from(std::iter::once("novel".to_string()).chain(args))
             .map_err(|e| e.to_string())?;
         let output = dispatch(self.ctx.clone(), cli.command.ok_or("缺少操作")?)?;
+        if let (Some(id), Some(_)) = (output["id"].as_str(), output["state"].as_str()) {
+            return Ok(Effect::Push(Page::Job(id.to_string())));
+        }
         self.ctx = Context::new(
             self.ctx.data_dir.clone(),
             if switch {
@@ -642,6 +665,11 @@ impl App {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| serde_json::to_string_pretty(&output).unwrap());
+        if let Some(chapter) = reading {
+            let title = self.path(&format!("{chapter} · 阅读正文"));
+            let offset = self.reading.entry((self.ctx.project_dir.clone(), format!("{chapter}:阅读正文"))).or_default();
+            return Ok(if viewer_at(&title, &text, self.plain, offset)? == Nav::Home { Effect::Home } else { Effect::Stay });
+        }
         self.view("操作结果", &text)
     }
     fn items(&mut self) -> Result<Vec<String>> {
@@ -719,10 +747,10 @@ impl App {
                     "查看正文来源",
                     "设置正文来源",
                 ]);
-                labels.push(format!("项目默认生成方案：{}", if preset == core::GenerationPreset::Compact { "精简四段式" } else { "通用方案" }));
+                labels.push(format!("项目默认生成方案：{}", preset_label(preset)));
                 labels
             },
-            Page::PromptCategories => words(&["通用方案", "精简四段式", "一致性检查", "更新记忆"]),
+            Page::PromptCategories => words(&["通用方案", "精简四段式", "对标方案", "一致性检查", "更新记忆"]),
             Page::PromptTemplate(category) => {
                 let settings = core::get_prompt_settings(self.ctx.clone())?;
                 let mut labels = words(&["编辑系统提示词", "编辑任务提示词模板", "查看模板与变量说明", "恢复当前分类默认模板"]);
@@ -761,7 +789,7 @@ impl App {
                     })
                     .collect()
             }
-            Page::Job(_) => words(&["状态 / 结果", "阶段日志", "查看实时进度", "请求安全取消"]),
+            Page::Job(_) => unreachable!("任务页使用实时视图"),
             Page::PromptPreview(_) => words(&["查看完整提示词", "编辑系统提示词（保存即采用）",
                 "编辑章节提示词（保存即采用）", "采用当前预览用于本章", "恢复自动组装"]),
             Page::Generate { id, preview } => {
@@ -904,7 +932,7 @@ impl App {
             }
             Page::PromptPreview(id) => return self.preview_action(&id, index),
             Page::PromptCategories => {
-                let category = *[PromptCategory::General, PromptCategory::Compact, PromptCategory::Consistency, PromptCategory::Memory]
+                let category = *[PromptCategory::General, PromptCategory::Compact, PromptCategory::Benchmark, PromptCategory::Consistency, PromptCategory::Memory]
                     .get(index).ok_or("无效的提示词分类")?;
                 return Ok(Effect::Push(Page::PromptTemplate(category)));
             }
@@ -947,12 +975,14 @@ impl App {
                     7 => words(&["source", "show"]),
                     9 => {
                         let preset = core::get_prompt_settings(self.ctx.clone())?.generation_preset;
+                        let options = ["general", "compact", "benchmark"];
                         let index = answer!(menu_choice(
                             &self.path("选择项目默认生成方案（保存后持续生效）"),
-                            &words(&["通用方案", "精简四段式"]), self.plain, self.no_color,
-                            &mut ListState::default().with_selected(Some(if preset == core::GenerationPreset::Compact { 1 } else { 0 })), false,
+                            &words(&["通用方案", "精简四段式", "对标方案"]), self.plain, self.no_color,
+                            &mut ListState::default().with_selected(Some(match preset {
+                                core::GenerationPreset::General => 0, core::GenerationPreset::Compact => 1, _ => 2 })), false,
                         ));
-                        words(&["prompt", "preset", if index == 1 { "compact" } else { "general" }])
+                        words(&["prompt", "preset", options.get(index).unwrap_or(&"general")])
                     }
                     _ => {
                         let current = core::get_source_settings(self.ctx.clone())?.directory;
@@ -1028,38 +1058,83 @@ impl App {
                     self.keys.get(index).ok_or("任务列表已变更")?.clone(),
                 )))
             }
-            Page::Job(id) => {
-                if index == 2 {
-                    return Ok(
-                        if job_monitor(&self.path("实时进度"), &self.ctx, &id, self.plain)?
-                            == Nav::Home
-                        {
-                            Effect::Home
-                        } else {
-                            Effect::Stay
-                        },
-                    );
-                }
-                if index == 3 && !answer!(self.confirm("请求安全取消任务？")) {
-                    return Ok(Effect::Stay);
-                }
-                args = words(&["job", ["show", "logs", "", "cancel"][index], &id]);
-            }
+            Page::Job(_) => unreachable!("任务页使用实时视图"),
             Page::Generate { id, preview } => return self.generate_action(&id, preview, index),
         }
         self.execute(args)
     }
     fn edit_chapter(&self, id: &str, external: bool) -> Result<Effect> {
-        let before = crate::chapter_before(&self.ctx, id)?;
+        self.edit_chapter_in(&self.ctx, id, external)
+    }
+    fn job_page(&mut self, id: &str) -> Result<Nav> {
+        loop {
+            let path = self.nav.path();
+            let choice = job_monitor(&path, &self.ctx, id, self.plain, self.no_color,
+                &mut self.nav.frames.last_mut().unwrap().list)?;
+            match choice {
+                JobAction::Back => return Ok(Nav::Back),
+                JobAction::Home => return Ok(Nav::Home),
+                JobAction::Refresh => continue,
+                _ => {}
+            }
+            let result = (|| -> Result<Effect> {
+                let status = crate::jobs::load(&self.ctx.data_dir, id)?;
+                let action = crate::jobs::action(&self.ctx.data_dir, id)?;
+                let (chapter, _, report) = job_target(&action);
+                match choice {
+                    JobAction::Details => {
+                        let mut details = format!("{}\n\n任务：{}\n项目：{}", job_summary(&status, &action), id, status.project.display());
+                        if let Some(error) = &status.error { details.push_str(&format!("\n\n错误：{error}")); }
+                        if let Some(result) = &status.result {
+                            details.push_str(&format!("\n\n结果：\n{}", serde_json::to_string_pretty(result).unwrap()));
+                        }
+                        self.view("任务详情", &details)
+                    }
+                    JobAction::Logs => {
+                        let text = read(&self.ctx.data_dir.join("jobs").join(id).join("progress.log"))
+                            .unwrap_or_else(|_| "暂无阶段日志".into());
+                        self.view("阶段日志", &text)
+                    }
+                    JobAction::Cancel => {
+                        if answer!(self.confirm("请求安全取消任务？")) {
+                            crate::jobs::cancel(&self.ctx.data_dir, id)?;
+                            self.view("取消请求已提交", "将在安全检查点取消；等待模型响应期间可能不会立即结束。")
+                        } else { Ok(Effect::Stay) }
+                    }
+                    JobAction::Read | JobAction::Edit | JobAction::Report => {
+                        if status.state != "succeeded" { return Err("任务尚未成功完成，请先查看任务详情".into()); }
+                        // Result operations always use the project captured at submission.
+                        let ctx = Context::new(self.ctx.data_dir.clone(), Some(status.project.clone()))?;
+                        if choice == JobAction::Edit { return self.edit_chapter_in(&ctx, chapter, false); }
+                        let text = if choice == JobAction::Read { core::read_chapter(ctx, chapter.into())? }
+                            else { core::read_report(ctx, chapter.into(), report.ok_or("此任务没有报告")?.into())? };
+                        let title = self.path(&format!("{} · {chapter} · {}", status.project.file_name().unwrap_or_default().to_string_lossy(), choice.label()));
+                        let offset = self.reading.entry((status.project.clone(), format!("{chapter}:{}", choice.label()))).or_default();
+                        Ok(if viewer_at(&title, &text, self.plain, offset)? == Nav::Home { Effect::Home } else { Effect::Stay })
+                    }
+                    _ => Ok(Effect::Stay),
+                }
+            })();
+            match result {
+                Ok(Effect::Home) => return Ok(Nav::Home),
+                Ok(_) => {},
+                Err(error) => {
+                    if viewer(&self.path("操作未完成"), &error, self.plain)? == Nav::Home { return Ok(Nav::Home); }
+                }
+            }
+        }
+    }
+    fn edit_chapter_in(&self, ctx: &Context, id: &str, external: bool) -> Result<Effect> {
+        let before = crate::chapter_before(ctx, id)?;
         let nav = edit_with_save(
-            &self.ctx.data_dir,
+            &ctx.data_dir,
             &self.path("编辑正文"),
             before.as_deref().unwrap_or(""),
             external,
             self.plain,
             |text| {
                 core::save_chapter_checked(
-                    self.ctx.clone(),
+                    ctx.clone(),
                     id.to_string(),
                     text.to_string(),
                     before.clone(),
@@ -1118,7 +1193,7 @@ impl App {
         }
         if index == 2 {
             let variables = match category {
-                PromptCategory::General | PromptCategory::Compact => "{{人物状态}}、{{前情}}、{{相关设定与伏笔}}、{{文风参考}}、{{事件骨架}}（必需）、{{目标字数}}、{{叙事要求}}、{{章节ID}}",
+                PromptCategory::General | PromptCategory::Compact | PromptCategory::Benchmark => "{{人物状态}}、{{前情}}、{{相关设定与伏笔}}、{{文风参考}}、{{事件骨架}}（必需）、{{目标字数}}、{{叙事要求}}、{{章节ID}}",
                 PromptCategory::Consistency => "{{章节ID}}、{{章节正文}}（必需）、{{事件骨架}}、{{人物状态}}、{{世界观规则}}、{{伏笔}}、{{近期事件}}、{{时间线}}",
                 PromptCategory::Memory => "{{章节ID}}、{{章节正文}}（必需）、{{人物状态}}、{{伏笔}}。请保留默认 JSON 输出结构及字段名，程序依赖这些字段更新记忆",
             };
@@ -1223,13 +1298,20 @@ impl App {
             let options: core::context::Options = serde_json::from_str(&draft.options).map_err(|e| e.to_string())?;
             let default_preset = core::get_prompt_settings(self.ctx.clone())?.generation_preset;
             let selected = answer!(menu_choice(&self.path("选择本章生成方案（不修改项目默认）"),
-                &[format!("跟随项目默认（{}）", preset_label(default_preset)), "通用方案".into(), "精简四段式".into()],
+                &[format!("跟随项目默认（{}）", preset_label(default_preset)), "通用方案".into(), "精简四段式".into(), "对标方案".into()],
                 self.plain, self.no_color, &mut ListState::default().with_selected(Some(match options.generation_preset {
-                    None => 0, Some(core::GenerationPreset::General) => 1, Some(core::GenerationPreset::Compact) => 2,
+                    None => 0,
+                    Some(core::GenerationPreset::General) => 1,
+                    Some(core::GenerationPreset::Compact) => 2,
+                    Some(core::GenerationPreset::Benchmark) => 3,
                 })), false));
             let mut options = options;
-            options.generation_preset = match selected { 1 => Some(core::GenerationPreset::General),
-                2 => Some(core::GenerationPreset::Compact), _ => None };
+            options.generation_preset = match selected {
+                1 => Some(core::GenerationPreset::General),
+                2 => Some(core::GenerationPreset::Compact),
+                3 => Some(core::GenerationPreset::Benchmark),
+                _ => None,
+            };
             self.drafts.get_mut(&key).unwrap().options = serde_json::to_string_pretty(&options).unwrap();
             return Ok(Effect::Stay);
         }
@@ -1250,7 +1332,7 @@ impl App {
             self.drafts.get_mut(&key).unwrap().overwrite = true;
         }
         let output = crate::jobs::submit(self.ctx.clone(), crate::jobs::Action::Generate(generation), true)?;
-        self.view("操作结果", &serde_json::to_string_pretty(&output).unwrap())
+        Ok(Effect::Push(Page::Job(output["id"].as_str().ok_or("任务缺少 ID")?.to_string())))
     }
     fn open_preview(&mut self, id: &str) -> Result<Effect> {
         let key = (self.ctx.project_dir.clone(), id.to_string());
@@ -1302,47 +1384,116 @@ impl App {
         Ok(if nav == Nav::Home { Effect::Home } else { Effect::Stay })
     }
 }
-fn job_monitor(path: &str, ctx: &Context, id: &str, plain: bool) -> Result<Nav> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JobAction { Read, Edit, Report, Details, Logs, Refresh, Cancel, Back, Home }
+impl JobAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Read => "阅读正文", Self::Edit => "编辑正文", Self::Report => "查看报告",
+            Self::Details => "任务详情 / 错误", Self::Logs => "阶段日志", Self::Refresh => "刷新状态",
+            Self::Cancel => "请求安全取消", Self::Back => "返回上一级", Self::Home => "返回主页",
+        }
+    }
+}
+fn job_target(action: &crate::jobs::Action) -> (&str, &'static str, Option<&'static str>) {
+    use crate::jobs::Action;
+    match action {
+        Action::Generate(g) => (&g.id, "生成正文", Some("generation")),
+        Action::Check { id } => (id, "一致性检查", Some("consistency")),
+        Action::Memory { id } => (id, "更新记忆", Some("memory")),
+        Action::Titles { id, .. } => (id, "生成章名", None),
+    }
+}
+fn job_actions(status: &crate::jobs::Status, action: &crate::jobs::Action) -> Vec<JobAction> {
+    let mut actions = vec![];
+    if status.state == "succeeded" {
+        actions.extend([JobAction::Read, JobAction::Edit]);
+        if job_target(action).2.is_some() { actions.push(JobAction::Report); }
+    }
+    actions.extend([JobAction::Details, JobAction::Logs, JobAction::Refresh]);
+    if status.active() { actions.push(JobAction::Cancel); }
+    actions.extend([JobAction::Back, JobAction::Home]);
+    actions
+}
+fn job_summary(status: &crate::jobs::Status, action: &crate::jobs::Action) -> String {
+    let (chapter, kind, _) = job_target(action);
+    let state = match status.state.as_str() {
+        "starting" => "正在启动", "running" => "运行中", "succeeded" => "已完成",
+        "failed" => "失败", "cancelled" => "已取消", "interrupted" => "已中断", other => other,
+    };
+    let end = if status.active() { chrono::Utc::now().timestamp() } else {
+        chrono::DateTime::parse_from_rfc3339(&status.updated_at).map(|t| t.timestamp()).unwrap_or(0)
+    };
+    let elapsed = chrono::DateTime::parse_from_rfc3339(&status.created_at)
+        .map(|t| (end - t.timestamp()).max(0)).unwrap_or(0);
+    let project = status.project.file_name().unwrap_or_default().to_string_lossy();
+    format!("{project} · {chapter} · {kind}\n状态：{state} · {}\n耗时：{:02}:{:02}\n{}",
+        status.stage, elapsed / 60, elapsed % 60,
+        if status.active() { "返回菜单或断开 SSH，任务继续运行。" }
+        else if status.state == "succeeded" { "结果已保存，可直接阅读和编辑。" }
+        else { "请查看任务详情和阶段日志。" })
+}
+fn render_job(f: &mut ratatui::Frame, path: &str, status: &crate::jobs::Status, action: &crate::jobs::Action, no_color: bool, state: &mut ListState) {
+    let actions = job_actions(status, action);
+            let [header, body, footer] = regions(f.area());
+            f.render_widget(Paragraph::new(short_path(path, header.width)), header);
+            let summary = job_summary(status, action);
+            let (lines, _) = layout(&summary.chars().collect::<Vec<_>>(), body.width.saturating_sub(2).max(1) as usize, false);
+            let parts = Layout::vertical([
+                Constraint::Length((lines.len() as u16 + 2).min(body.height / 2)), Constraint::Min(1),
+            ]).split(body);
+            f.render_widget(Paragraph::new(lines.join("\n")).block(Block::default().borders(Borders::ALL)), parts[0]);
+            let highlight = if no_color { Style::default().add_modifier(ratatui::style::Modifier::REVERSED) }
+                else { Style::default().fg(Color::Cyan) };
+            f.render_stateful_widget(List::new(actions.iter().enumerate().map(|(i, a)| ListItem::new(format!("{}. {}", i + 1, a.label()))))
+                .block(Block::default().borders(Borders::ALL)).highlight_symbol("› ").highlight_style(highlight), parts[1], state);
+            f.render_widget(Paragraph::new("自动刷新 · ↑↓ / 数字 Enter 选择\nEsc 返回，任务继续运行\nHome / H 主页"), footer);
+}
+fn job_monitor(path: &str, ctx: &Context, id: &str, plain: bool, no_color: bool,
+    state: &mut ListState) -> Result<JobAction> {
+    let action = crate::jobs::action(&ctx.data_dir, id)?;
     if plain {
-        return viewer(
-            path,
-            &serde_json::to_string_pretty(&crate::jobs::load(&ctx.data_dir, id)?).unwrap(),
-            true,
-        );
+        let status = crate::jobs::load(&ctx.data_dir, id)?;
+        let actions = job_actions(&status, &action);
+        return Ok(match menu_choice(&format!("{path}\n{}\n纯文本模式：选择刷新状态获取最新结果。", job_summary(&status, &action)),
+            &actions.iter().map(|a| a.label().to_string()).collect::<Vec<_>>(), true, no_color, state, true)? {
+            Choice::Selected(index) => actions[index], Choice::Back => JobAction::Back, Choice::Home => JobAction::Home,
+        });
     }
     let mut session = Session::new()?;
+    let mut previous = Vec::new();
+    let mut digits = String::new();
     loop {
         let status = crate::jobs::load(&ctx.data_dir, id)?;
-        let text = serde_json::to_string_pretty(&status).unwrap();
-        session
-            .terminal
-            .draw(|f| {
-                let [header, body, footer] = regions(f.area());
-                f.render_widget(Paragraph::new(short_path(path, header.width)), header);
-                f.render_widget(
-                    Paragraph::new(text.as_str())
-                        .wrap(Wrap { trim: false })
-                        .block(Block::default().borders(Borders::ALL)),
-                    body,
-                );
-                f.render_widget(
-                    Paragraph::new(
-                        "自动刷新；返回不取消任务\n[Esc 返回上一级]\n[Home / H 返回主页]",
-                    ),
-                    footer,
-                );
-            })
-            .map_err(|e| e.to_string())?;
-        if event::poll(std::time::Duration::from_millis(250)).map_err(|e| e.to_string())? {
-            if let Event::Key(k) = next_event()? {
-                if k.kind == KeyEventKind::Release {
-                    continue;
+        let actions = job_actions(&status, &action);
+        // Keep the same action selected when completion adds result actions above it.
+        if previous != actions {
+            let selected = state.selected().and_then(|i| previous.get(i));
+            state.select(Some(if previous.is_empty() { state.selected().unwrap_or(0).min(actions.len() - 1) }
+                else { selected.and_then(|a| actions.iter().position(|v| v == a)).unwrap_or(0) }));
+            previous = actions.clone();
+            digits.clear();
+        }
+        session.terminal.draw(|f| render_job(f, path, &status, &action, no_color, state)).map_err(|e| e.to_string())?;
+        if !event::poll(std::time::Duration::from_millis(500)).map_err(|e| e.to_string())? { continue; }
+        if let Event::Key(k) = next_event()? {
+            if k.kind == KeyEventKind::Release { continue; }
+            let current = state.selected().unwrap_or(0);
+            match k.code {
+                KeyCode::Esc => return Ok(JobAction::Back),
+                KeyCode::Home | KeyCode::Char('h' | 'H') => return Ok(JobAction::Home),
+                KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => return Ok(JobAction::Back),
+                KeyCode::Up | KeyCode::PageUp => { state.select(Some(current.saturating_sub(1))); digits.clear(); }
+                KeyCode::Down | KeyCode::PageDown => { state.select(Some((current + 1).min(actions.len() - 1))); digits.clear(); }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    digits.push(c);
+                    if let Ok(n) = digits.parse::<usize>() {
+                        if n > 0 && n <= actions.len() { state.select(Some(n - 1)); }
+                        else { digits.clear(); }
+                    }
                 }
-                match k.code {
-                    KeyCode::Esc | KeyCode::Enter => return Ok(Nav::Back),
-                    KeyCode::Home | KeyCode::Char('h' | 'H') => return Ok(Nav::Home),
-                    _ => {}
-                }
+                KeyCode::Enter => return Ok(actions[state.selected().unwrap_or(0)]),
+                _ => {}
             }
         }
     }
@@ -1365,10 +1516,19 @@ pub fn run(mut ctx: Context, plain: bool, no_color: bool) -> Result<()> {
         no_color,
         nav: Navigation::new(),
         drafts: std::collections::HashMap::new(),
+        reading: std::collections::HashMap::new(),
         keys: vec![],
     };
     loop {
         crate::STOP_WAIT.store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Page::Job(id) = app.nav.page().clone() {
+            let nav = match app.job_page(&id) {
+                Ok(nav) => nav,
+                Err(error) => viewer(&app.path("任务加载失败"), &error, plain)?,
+            };
+            app.nav.go(nav);
+            continue;
+        }
         let items = match app.items() {
             Ok(items) => items,
             Err(error) => {
@@ -1973,6 +2133,74 @@ fn plain_editor<F: FnMut(&str) -> Result<()>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn benchmark_fields_save_independently_and_reset_without_changing_other_templates() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Context::new(dir.path().join("data"), Some(dir.path().join("book"))).unwrap();
+        core::project_manager::open_project(ctx.clone(), ctx.project_dir.display().to_string(), true, None, None).unwrap();
+        let before = core::get_prompt_settings(ctx.clone()).unwrap();
+        assert_eq!(before.benchmark_generation, core::TaskPrompt::default());
+        save_template_field(&ctx, PromptCategory::Benchmark, true, "", "对标系统").unwrap();
+        save_template_field(&ctx, PromptCategory::Benchmark, false, "", "草稿").unwrap();
+        save_template_field(&ctx, PromptCategory::Benchmark, false, "草稿", "对标：{{事件骨架}}").unwrap();
+        let reopened = Context::new(ctx.data_dir.clone(), Some(ctx.project_dir.clone())).unwrap();
+        let edited = core::get_prompt_settings(reopened.clone()).unwrap();
+        assert_eq!(edited.benchmark_generation.system, "对标系统");
+        assert_eq!(edited.benchmark_generation.user_template, "对标：{{事件骨架}}");
+        assert!(save_template_field(&ctx, PromptCategory::Benchmark, false, "对标：{{事件骨架}}", "{{未知变量}}").is_err());
+        assert!(save_template_field(&ctx, PromptCategory::Benchmark, false, "对标：{{事件骨架}}", "{{事件骨架").is_err());
+        let mut reset = edited.clone();
+        PromptCategory::Benchmark.replace(&mut reset, core::TaskPrompt::default());
+        core::save_prompt_checked(reopened, reset, serde_json::to_value(edited).unwrap()).unwrap();
+        assert_eq!(core::get_prompt_settings(ctx).unwrap(), before);
+    }
+    fn sample_job(state: &str) -> crate::jobs::Status {
+        crate::jobs::Status {
+            id: uuid::Uuid::new_v4().to_string(), project: "原项目".into(), state: state.into(),
+            stage: "等待模型返回".into(), created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:02:03Z".into(), result: None, error: None,
+        }
+    }
+    #[test]
+    fn task_results_are_available_only_after_success_and_match_task_kind() {
+        let action = crate::jobs::Action::Check { id: "ch012".into() };
+        for state in ["starting", "running", "failed", "cancelled", "interrupted"] {
+            let actions = job_actions(&sample_job(state), &action);
+            assert!(!actions.contains(&JobAction::Read));
+            assert!(!actions.contains(&JobAction::Edit));
+            assert!(!actions.contains(&JobAction::Report));
+            assert_eq!(actions.contains(&JobAction::Cancel), matches!(state, "starting" | "running"));
+            assert!(actions.contains(&JobAction::Details));
+        }
+        assert_eq!(job_target(&action), ("ch012", "一致性检查", Some("consistency")));
+        assert!(job_actions(&sample_job("succeeded"), &action).contains(&JobAction::Report));
+        let titles = crate::jobs::Action::Titles { id: "ch012".into(), previous_candidates: vec![] };
+        assert!(!job_actions(&sample_job("succeeded"), &titles).contains(&JobAction::Report));
+        let summary = job_summary(&sample_job("succeeded"), &action);
+        assert!(summary.contains("02:03"));
+        assert!(summary.contains("原项目 · ch012"));
+    }
+    #[test]
+    fn task_screen_renders_on_phone_and_desktop_and_scrolls_actions() {
+        for (width, height) in [(32, 16), (80, 24), (120, 30), (8, 6)] {
+            for state in ["running", "succeeded", "failed"] {
+                let status = sample_job(state);
+                let action = crate::jobs::Action::Check { id: "ch012".into() };
+                let mut terminal = Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+                let mut selection = ListState::default().with_selected(Some(0));
+                terminal.draw(|f| render_job(f, "主页 › 任务中心", &status, &action, true, &mut selection)).unwrap();
+                let visible: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+                if width >= 32 {
+                    assert!(visible.contains("ch012"));
+                    assert!(visible.replace(' ', "").contains(if state == "succeeded" { "阅读正文" } else { "任务详情" }), "{width}x{height} {state}: {visible}");
+                    selection.select(Some(job_actions(&status, &action).len() - 1));
+                    terminal.draw(|f| render_job(f, "任务中心", &status, &action, false, &mut selection)).unwrap();
+                    let visible: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+                    assert!(visible.replace(' ', "").contains("返回主页"));
+                }
+            }
+        }
+    }
     #[test]
     fn template_field_edits_preserve_other_tasks_and_reject_conflicts_and_invalid_variables() {
         let dir = tempfile::tempdir().unwrap();

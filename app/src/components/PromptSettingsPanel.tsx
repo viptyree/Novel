@@ -7,15 +7,21 @@ import { useProjectActivity } from "../projectActivity";
 type Category = "generation" | "consistency" | "memory";
 const CATEGORIES: Category[] = ["generation", "consistency", "memory"];
 function readTask(settings: PromptSettings, category: Category, preset: GenerationPreset): TaskPrompt {
-  return category === "generation" ? preset === "compact" ? settings.compact_generation : { system: settings.system, user_template: settings.user_template } : settings[category];
+  if (category !== "generation") return settings[category];
+  if (preset === "compact") return settings.compact_generation;
+  if (preset === "benchmark") return settings.benchmark_generation;
+  return { system: settings.system, user_template: settings.user_template };
 }
 function replaceTask(settings: PromptSettings, category: Category, preset: GenerationPreset, task: TaskPrompt): PromptSettings {
-  return category === "generation" ? preset === "compact" ? { ...settings, compact_generation: task } : { ...settings, ...task } : { ...settings, [category]: task };
+  if (category !== "generation") return { ...settings, [category]: task };
+  if (preset === "compact") return { ...settings, compact_generation: task };
+  if (preset === "benchmark") return { ...settings, benchmark_generation: task };
+  return { ...settings, system: task.system, user_template: task.user_template };
 }
 function readCategory(settings: PromptSettings, category: Category) {
   if (category !== "generation") return settings[category];
-  const { system, user_template, generation_preset, compact_generation, general_material_guidance, compact_material_guidance } = settings;
-  return { system, user_template, generation_preset, compact_generation, general_material_guidance, compact_material_guidance };
+  const { system, user_template, generation_preset, compact_generation, benchmark_generation, general_material_guidance, compact_material_guidance, benchmark_material_guidance } = settings;
+  return { system, user_template, generation_preset, compact_generation, benchmark_generation, general_material_guidance, compact_material_guidance, benchmark_material_guidance };
 }
 function replaceCategory(settings: PromptSettings, draft: PromptSettings, category: Category): PromptSettings {
   return category === "generation" ? { ...settings, ...readCategory(draft, category) } : { ...settings, [category]: draft[category] };
@@ -65,9 +71,11 @@ export default function PromptSettingsPanel({ onSaved }: { onSaved: () => void }
     try {
       const defaults = await api.defaultPromptSettings();
       update(readTask(defaults, category, preset));
-      if (category === "generation") setSettings((s) => s && { ...s,
-        [preset === "compact" ? "compact_material_guidance" : "general_material_guidance"]:
-          preset === "compact" ? defaults.compact_material_guidance : defaults.general_material_guidance });
+      if (category === "generation") {
+        const key = preset === "compact" ? "compact_material_guidance" : preset === "benchmark" ? "benchmark_material_guidance" : "general_material_guidance";
+        const value = preset === "compact" ? defaults.compact_material_guidance : preset === "benchmark" ? defaults.benchmark_material_guidance : defaults.general_material_guidance;
+        setSettings((s) => s && { ...s, [key]: value } as PromptSettings);
+      }
     }
     catch (e) { setBanner({ kind: "err", msg: String(e) }); }
     finally { setBusy(false); }
@@ -104,6 +112,7 @@ export default function PromptSettingsPanel({ onSaved }: { onSaved: () => void }
             <select disabled={busy} value={preset} onChange={(e) => setPreset(e.target.value as GenerationPreset)}>
               <option value="general">{t("pr.general")}</option>
               <option value="compact">{t("pr.compact")}</option>
+              <option value="benchmark">{t("pr.benchmark")}</option>
             </select>
           </Field>
           <Field label={t("pr.defaultPreset")}>
@@ -111,14 +120,18 @@ export default function PromptSettingsPanel({ onSaved }: { onSaved: () => void }
               onChange={(e) => updateGeneration({ generation_preset: e.target.value as GenerationPreset })}>
               <option value="general">{t("pr.general")}</option>
               <option value="compact">{t("pr.compact")}</option>
+              <option value="benchmark">{t("pr.benchmark")}</option>
             </select>
           </Field>
         </div>
         <label><input type="checkbox" disabled={busy}
-          checked={preset === "compact" ? settings.compact_material_guidance : settings.general_material_guidance}
-          onChange={(e) => updateGeneration({ [preset === "compact" ? "compact_material_guidance" : "general_material_guidance"]: e.target.checked })} />
+          checked={preset === "compact" ? settings.compact_material_guidance : preset === "benchmark" ? settings.benchmark_material_guidance : settings.general_material_guidance}
+          onChange={(e) => {
+            const key = preset === "compact" ? "compact_material_guidance" : preset === "benchmark" ? "benchmark_material_guidance" : "general_material_guidance";
+            updateGeneration({ [key]: e.target.checked } as Partial<PromptSettings>);
+          }} />
           {t("pr.materialGuidance")}</label>
-        <p className="muted">{t(preset === "compact" ? "pr.compactHint" : "pr.generalHint")}</p>
+        <p className="muted">{t(preset === "compact" ? "pr.compactHint" : preset === "benchmark" ? "pr.benchmarkHint" : "pr.generalHint")}</p>
       </> : null}
       {task ? <>
         <Field label={t("pr.system")}><textarea className="prompt-system" disabled={busy} value={task.system}

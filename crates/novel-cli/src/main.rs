@@ -204,7 +204,7 @@ pub struct Generate {
     #[arg(long)]
     /// 上下文选项 JSON 文件。
     pub context_options: Option<PathBuf>,
-    #[arg(long, value_parser = ["general", "compact"])]
+    #[arg(long, value_parser = ["general", "compact", "benchmark"])]
     /// 仅本次生成/预览覆盖项目默认方案。
     pub preset: Option<String>,
     #[arg(long)]
@@ -285,7 +285,7 @@ pub enum Prompt {
     Show,
     /// 查看或设置当前项目的默认生成方案。
     Preset {
-        #[arg(value_parser = ["general", "compact"])]
+        #[arg(value_parser = ["general", "compact", "benchmark"])]
         preset: Option<String>,
     },
     Save {
@@ -439,7 +439,11 @@ pub fn generation(context: &Context, args: &Generate) -> Result<jobs::Generation
         .transpose()?
         .unwrap_or_default();
     if let Some(preset) = &args.preset {
-        options.generation_preset = Some(if preset == "compact" { core::GenerationPreset::Compact } else { core::GenerationPreset::General });
+        options.generation_preset = Some(match preset.as_str() {
+            "compact" => core::GenerationPreset::Compact,
+            "benchmark" => core::GenerationPreset::Benchmark,
+            _ => core::GenerationPreset::General,
+        });
     }
     let prompt_override = args
         .prompt_override
@@ -705,12 +709,18 @@ pub fn dispatch(ctx: Context, command: Command) -> Result<Value> {
                     let before = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
                     settings.generation_preset = match name.as_str() {
                         "compact" => core::GenerationPreset::Compact,
+                        "benchmark" => core::GenerationPreset::Benchmark,
                         _ => core::GenerationPreset::General,
                     };
                     core::save_prompt_checked(ctx.clone(), settings.clone(), before)?;
                 }
+                let label = match settings.generation_preset {
+                    core::GenerationPreset::General => "通用方案",
+                    core::GenerationPreset::Compact => "精简四段式",
+                    core::GenerationPreset::Benchmark => "对标方案",
+                };
                 Ok(json!({"generation_preset": settings.generation_preset,
-                    "label": if settings.generation_preset == core::GenerationPreset::Compact { "精简四段式" } else { "通用方案" },
+                    "label": label,
                     "project": ctx.project_dir}))
             },
             Prompt::Save { input } => {

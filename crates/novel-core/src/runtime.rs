@@ -160,7 +160,9 @@ impl FileLock {
             FileExt::try_lock_shared(&file)
         };
         result.map_err(|e| {
-            if e.kind() == std::io::ErrorKind::WouldBlock {
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.raw_os_error() == fs2::lock_contended_error().raw_os_error()
+            {
                 format!("资源忙：{}，请等待当前操作结束", path.display())
             } else {
                 format!("无法锁定 {}：{e}", path.display())

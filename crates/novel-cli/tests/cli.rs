@@ -1,26 +1,40 @@
 use serde_json::{json, Value};
 use std::{
     fs,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     net::TcpListener,
     path::Path,
     process::{Command, Output, Stdio},
     time::Duration,
 };
 fn run(data: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_novel"))
+    // Files let us wait for the CLI alone. On Windows, a detached worker may
+    // inherit an extra pipe handle and keep Command::output waiting for EOF.
+    let mut stdout = tempfile::tempfile().unwrap();
+    let mut stderr = tempfile::tempfile().unwrap();
+    let status = Command::new(env!("CARGO_BIN_EXE_novel"))
         .arg("--data-dir")
         .arg(data)
         .args(args)
-        .output()
-        .unwrap()
+        .stdin(Stdio::null())
+        .stdout(stdout.try_clone().unwrap())
+        .stderr(stderr.try_clone().unwrap())
+        .status()
+        .unwrap();
+    stdout.seek(SeekFrom::Start(0)).unwrap();
+    stderr.seek(SeekFrom::Start(0)).unwrap();
+    let mut output = Output { status, stdout: vec![], stderr: vec![] };
+    stdout.read_to_end(&mut output.stdout).unwrap();
+    stderr.read_to_end(&mut output.stderr).unwrap();
+    output
 }
 fn ok(data: &Path, args: &[&str]) -> Value {
     let out = run(data, args);
     assert!(
         out.status.success(),
-        "{:?}\n{}",
+        "{:?}\nstdout: {}\nstderr: {}",
         args,
+        String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr)
     );
     serde_json::from_slice(&out.stdout).unwrap()
@@ -40,6 +54,14 @@ fn model(
     responses: Vec<String>,
     delay: Duration,
 ) -> std::thread::JoinHandle<Vec<Value>> {
+    controlled_model(data, responses, delay, None)
+}
+fn controlled_model(
+    data: &Path,
+    responses: Vec<String>,
+    delay: Duration,
+    release: Option<std::path::PathBuf>,
+) -> std::thread::JoinHandle<Vec<Value>> {
     let server = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}/v1", server.local_addr().unwrap());
     ok(data, &["settings", "set", "llm_base_url", &url]);
@@ -54,6 +76,13 @@ fn model(
             while bytes.len()<split+length{let n=stream.read(&mut buf).unwrap();assert!(n>0);bytes.extend_from_slice(&buf[..n]);}
             let request=serde_json::from_slice(&bytes[split..split+length]).unwrap();
             fs::write(&accepted,b"accepted").unwrap();
+            if let Some(release) = &release {
+                let deadline = std::time::Instant::now() + Duration::from_secs(20);
+                while !release.exists() {
+                    assert!(std::time::Instant::now() < deadline, "test did not release model response");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
             std::thread::sleep(delay);
             let body=json!({"choices":[{"message":{"content":content}}]}).to_string();
             write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",body.len(),body).unwrap();request
@@ -124,7 +153,8 @@ fn full_pipeline_uses_shared_data_and_preserves_generation_contract() {
 #[test]
 fn detached_worker_survives_client_exit_and_blocks_concurrent_writes() {
     let (_temp, data, root) = setup();
-    let server = model(&data, vec!["后台完成。".into()], Duration::from_secs(2));
+    let release = data.join("release-model");
+    let server = controlled_model(&data, vec!["后台完成。".into()], Duration::ZERO, Some(release.clone()));
     let status = ok(
         &data,
         &[
@@ -139,12 +169,13 @@ fn detached_worker_survives_client_exit_and_blocks_concurrent_writes() {
         ],
     );
     let id = status["id"].as_str().unwrap();
-    assert!(!run(&data, &["__worker", id]).status.success());
     assert_eq!(ok(&data, &["job", "show", id])["state"], "running");
     let busy = run(&data, &["chapter", "new", "ch002"]);
     assert_eq!(busy.status.code(), Some(3));
     assert!(run(&data, &["chapter", "list"]).status.success());
+    fs::write(release, b"release").unwrap();
     ok(&data, &["job", "wait", id]);
+    assert!(!run(&data, &["__worker", id]).status.success());
     server.join().unwrap();
     assert_eq!(
         fs::read_to_string(root.join("chapters/ch001/chapter.md")).unwrap(),
@@ -196,7 +227,8 @@ fn killing_waiting_client_does_not_kill_worker() {
 fn cancellation_keeps_existing_chapter_and_noninteractive_contracts_hold() {
     let (_temp, data, root) = setup();
     ok(&data, &["chapter", "new", "ch001"]);
-    let server = model(&data, vec!["应当放弃的新稿".into()], Duration::from_secs(1));
+    let release = data.join("release-model");
+    let server = controlled_model(&data, vec!["应当放弃的新稿".into()], Duration::ZERO, Some(release.clone()));
     let status = ok(
         &data,
         &[
@@ -219,6 +251,7 @@ fn cancellation_keeps_existing_chapter_and_noninteractive_contracts_hold() {
         std::thread::sleep(Duration::from_millis(20));
     }
     ok(&data, &["job", "cancel", id]);
+    fs::write(release, b"release").unwrap();
     let wait = run(&data, &["job", "wait", id]);
     assert_eq!(wait.status.code(), Some(130));
     server.join().unwrap();
@@ -280,6 +313,42 @@ fn partial_save_failure_is_reported_without_claiming_generation_succeeded() {
     server.join().unwrap();
     let jobs = ok(&data, &["job", "list"]);
     assert_eq!(jobs[0]["state"], "failed");
+}
+
+#[test]
+fn benchmark_draft_persists_and_is_validated_only_when_used() {
+    let (temp, data, _root) = setup();
+    let mut settings = ok(&data, &["prompt", "show"]);
+    assert_eq!(settings["benchmark_generation"], json!({"system":"", "user_template":""}));
+    assert_eq!(settings["benchmark_material_guidance"], false);
+    ok(&data, &["prompt", "preset", "benchmark"]);
+    let preview = ["--json", "prompt", "preview", "ch001", "--idea", "进入山谷", "--no-context"];
+    let failure = run(&data, &preview);
+    assert!(!failure.status.success());
+    let error: Value = serde_json::from_slice(&failure.stdout).unwrap();
+    assert!(error["error"].as_str().unwrap().contains("对标方案尚未配置完整"));
+    let mut general = preview.to_vec();
+    general.extend(["--preset", "general"]);
+    ok(&data, &general);
+    settings["generation_preset"] = json!("benchmark");
+    let file = temp.path().join("prompt.json");
+    for draft in [json!({"system":"对标系统", "user_template":""}),
+                  json!({"system":"对标系统", "user_template":"草稿"})] {
+        settings["benchmark_generation"] = draft;
+        fs::write(&file, serde_json::to_vec(&settings).unwrap()).unwrap();
+        ok(&data, &["prompt", "save", "--file", file.to_str().unwrap()]);
+        assert_eq!(ok(&data, &["prompt", "show"]), settings);
+        assert!(!run(&data, &preview).status.success());
+    }
+    settings["benchmark_generation"]["user_template"] = json!("对标：{{事件骨架}}");
+    fs::write(&file, serde_json::to_vec(&settings).unwrap()).unwrap();
+    ok(&data, &["prompt", "save", "--file", file.to_str().unwrap()]);
+    let result = ok(&data, &preview);
+    assert!(result["prompts"]["system"].as_str().unwrap().contains("对标系统"));
+    let user = result["prompts"]["user"].as_str().unwrap();
+    assert!(user.contains("对标：进入山谷"));
+    assert!(!user.contains("【资料使用原则】"));
+    assert_eq!(ok(&data, &["prompt", "preset"])["generation_preset"], "benchmark");
 }
 
 #[test]
